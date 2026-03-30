@@ -20,14 +20,16 @@ var dndCmd = &cobra.Command{
 
 func init() {
 	dndCmd.Flags().String("addr", "localhost:4000", "proxy address to query")
+	dndCmd.Flags().String("session", "", "session identifier to inspect or control")
 }
 
 func runDND(cmd *cobra.Command, args []string) error {
 	addr, _ := cmd.Flags().GetString("addr")
+	session, _ := cmd.Flags().GetString("session")
 	out := cmd.OutOrStdout()
 
 	if len(args) == 0 {
-		status, err := fetchDNDStatus(addr)
+		status, err := fetchDNDStatus(addr, session)
 		if err != nil {
 			return err
 		}
@@ -52,7 +54,7 @@ func runDND(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid argument %q: use 'on' or 'off'", args[0])
 	}
 
-	status, err := updateDNDStatus(addr, enabled)
+	status, err := updateDNDStatus(addr, session, enabled)
 	if err != nil {
 		return err
 	}
@@ -77,8 +79,8 @@ type dndStatusResponse struct {
 	Status string `json:"status"`
 }
 
-func fetchDNDStatus(addr string) (dndStatusResponse, error) {
-	resp, err := http.Get("http://" + addr + "/v1/dnd")
+func fetchDNDStatus(addr, session string) (dndStatusResponse, error) {
+	resp, err := http.Get(managementURL(addr, "/v1/dnd", session))
 	if err != nil {
 		return dndStatusResponse{}, fmt.Errorf("connect to proxy at %s: %w", addr, err)
 	}
@@ -86,13 +88,13 @@ func fetchDNDStatus(addr string) (dndStatusResponse, error) {
 	return decodeDNDResponse(addr, resp)
 }
 
-func updateDNDStatus(addr string, enabled bool) (dndStatusResponse, error) {
+func updateDNDStatus(addr, session string, enabled bool) (dndStatusResponse, error) {
 	body, err := json.Marshal(map[string]bool{"enabled": enabled})
 	if err != nil {
 		return dndStatusResponse{}, fmt.Errorf("encode dnd body: %w", err)
 	}
 
-	resp, err := http.Post("http://"+addr+"/v1/dnd", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(managementURL(addr, "/v1/dnd", session), "application/json", bytes.NewReader(body))
 	if err != nil {
 		return dndStatusResponse{}, fmt.Errorf("connect to proxy at %s: %w", addr, err)
 	}

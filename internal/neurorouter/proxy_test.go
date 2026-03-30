@@ -1053,6 +1053,123 @@ func TestHandleResponses_DNDSuppressesSuggestionHeader(t *testing.T) {
 	}
 }
 
+func TestHandleResponses_AuditIsolationBySession(t *testing.T) {
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		DryRun: true,
+		Targets: map[string]Target{
+			"test": {BaseURL: "https://example.invalid"},
+		},
+		Neurocache: NeurocacheConfig{Enabled: true},
+	})
+
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := `{"model":"test","input":[{"type":"message","role":"user","content":"hi"}]}`
+	postSessionRequest(t, addr, "alpha", body)
+	postSessionRequest(t, addr, "beta", body)
+
+	alphaAudit := fetchAuditPayload(t, addr, "alpha")
+	if alphaAudit.Count != 1 {
+		t.Fatalf("alpha audit count: got %d, want 1", alphaAudit.Count)
+	}
+
+	betaAudit := fetchAuditPayload(t, addr, "beta")
+	if betaAudit.Count != 1 {
+		t.Fatalf("beta audit count: got %d, want 1", betaAudit.Count)
+	}
+}
+
+func TestHandleResponses_SessionScopedSuggestionsAndDND(t *testing.T) {
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		DryRun: true,
+		Targets: map[string]Target{
+			"test": {BaseURL: "https://example.invalid"},
+		},
+		Neurocache: NeurocacheConfig{Enabled: true},
+	})
+
+	alphaRuntime := p.runtimeForSession("alpha")
+	betaRuntime := p.runtimeForSession("beta")
+	seedDNDSuggestionsInRuntime(t, alphaRuntime)
+	seedDNDSuggestionsInRuntime(t, betaRuntime)
+
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	alphaSuggestions := fetchSuggestionsPayload(t, addr, "alpha")
+	if len(alphaSuggestions.Suggestions) != 2 {
+		t.Fatalf("alpha suggestions before dnd: got %d, want 2", len(alphaSuggestions.Suggestions))
+	}
+
+	betaSuggestions := fetchSuggestionsPayload(t, addr, "beta")
+	if len(betaSuggestions.Suggestions) != 2 {
+		t.Fatalf("beta suggestions before dnd: got %d, want 2", len(betaSuggestions.Suggestions))
+	}
+
+	postDNDToggleForSession(t, addr, "alpha", true)
+
+	alphaSnapshot := fetchDNDSnapshotForSession(t, addr, "alpha")
+	if !alphaSnapshot.Active {
+		t.Fatal("expected alpha dnd to be active")
+	}
+
+	betaSnapshot := fetchDNDSnapshotForSession(t, addr, "beta")
+	if betaSnapshot.Active {
+		t.Fatal("expected beta dnd to remain inactive")
+	}
+
+	body := `{"model":"test","input":[{"type":"message","role":"user","content":"hi"}]}`
+	alphaResp := postSessionRequest(t, addr, "alpha", body)
+	defer func() { _ = alphaResp.Body.Close() }()
+	if got := alphaResp.Header.Get("X-Neurorouter-Suggestions"); got != "1" {
+		t.Fatalf("alpha header: got %q, want 1", got)
+	}
+
+	betaResp := postSessionRequest(t, addr, "beta", body)
+	defer func() { _ = betaResp.Body.Close() }()
+	if got := betaResp.Header.Get("X-Neurorouter-Suggestions"); got != "2" {
+		t.Fatalf("beta header: got %q, want 2", got)
+	}
+}
+
+func TestHandleResponses_UsesMetadataSessionKey(t *testing.T) {
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		DryRun: true,
+		Targets: map[string]Target{
+			"test": {BaseURL: "https://example.invalid"},
+		},
+		Neurocache: NeurocacheConfig{Enabled: true},
+	})
+
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := `{"model":"test","input":[{"type":"message","role":"user","content":"hi"}],"metadata":{"session_id":"codex-thread-1"}}`
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	audit := fetchAuditPayload(t, addr, "codex-thread-1")
+	if audit.Count != 1 {
+		t.Fatalf("metadata audit count: got %d, want 1", audit.Count)
+	}
+}
+
 func TestHandleResponses_RequestThrashActivatesAutoDND(t *testing.T) {
 	p := NewProxy(ProxyConfig{
 		Listen:  ":0",
@@ -1155,6 +1272,26 @@ func fetchDNDSnapshot(t *testing.T, addr string) DNDSnapshot {
 	return snapshot
 }
 
+func fetchDNDSnapshotForSession(t *testing.T, addr, session string) DNDSnapshot {
+	t.Helper()
+
+	resp, err := http.Get(localProxyURL(addr, "/v1/dnd?session="+session))
+	if err != nil {
+		t.Fatalf("fetch dnd: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("dnd status: got %d, want 200", resp.StatusCode)
+	}
+
+	var snapshot DNDSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode dnd: %v", err)
+	}
+	return snapshot
+}
+
 func postDNDToggle(t *testing.T, addr string, enabled bool) DNDSnapshot {
 	t.Helper()
 
@@ -1176,16 +1313,115 @@ func postDNDToggle(t *testing.T, addr string, enabled bool) DNDSnapshot {
 	return snapshot
 }
 
+func postDNDToggleForSession(t *testing.T, addr, session string, enabled bool) DNDSnapshot {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"enabled":%t}`, enabled)
+	resp, err := http.Post(localProxyURL(addr, "/v1/dnd?session="+session), "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("toggle dnd: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("toggle status: got %d, want 200", resp.StatusCode)
+	}
+
+	var snapshot DNDSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode toggle dnd: %v", err)
+	}
+	return snapshot
+}
+
 func seedDNDSuggestions(t *testing.T, p *Proxy) {
 	t.Helper()
 
-	if p.pipeline == nil || p.pipeline.neurocache == nil {
+	seedDNDSuggestionsInRuntime(t, p.runtimeForSession(defaultSessionKey))
+}
+
+func seedDNDSuggestionsInRuntime(t *testing.T, runtime *sessionRuntime) {
+	t.Helper()
+
+	if runtime == nil || runtime.pipeline == nil || runtime.pipeline.neurocache == nil {
 		t.Fatal("proxy neurocache is not initialized")
 	}
 
-	p.pipeline.neurocache.fileReads["/tmp/repeat.txt"] = 3
-	p.pipeline.neurocache.uniqueRemBytes = 1
-	p.pipeline.neurocache.reminderBytes = 7_000_000
+	runtime.pipeline.neurocache.fileReads["/tmp/repeat.txt"] = 3
+	runtime.pipeline.neurocache.uniqueRemBytes = 1
+	runtime.pipeline.neurocache.reminderBytes = 7_000_000
+}
+
+func postSessionRequest(t *testing.T, addr, session, body string) *http.Response {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, localProxyURL(addr, "/v1/responses"), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(sessionHeaderName, session)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post session request: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("status %d: %s", resp.StatusCode, string(data))
+	}
+	return resp
+}
+
+func fetchSuggestionsPayload(t *testing.T, addr, session string) struct {
+	Suggestions []Suggestion `json:"suggestions"`
+} {
+	t.Helper()
+
+	resp, err := http.Get(localProxyURL(addr, "/v1/suggestions?session="+session))
+	if err != nil {
+		t.Fatalf("suggestions: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("suggestions status: got %d, want 200", resp.StatusCode)
+	}
+
+	var payload struct {
+		Suggestions []Suggestion `json:"suggestions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode suggestions: %v", err)
+	}
+	return payload
+}
+
+func fetchAuditPayload(t *testing.T, addr, session string) struct {
+	Count   int          `json:"count"`
+	Entries []AuditEntry `json:"entries"`
+} {
+	t.Helper()
+
+	resp, err := http.Get(localProxyURL(addr, "/v1/audit?session="+session))
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("audit status: got %d, want 200", resp.StatusCode)
+	}
+
+	var payload struct {
+		Count   int          `json:"count"`
+		Entries []AuditEntry `json:"entries"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode audit: %v", err)
+	}
+	return payload
 }
 
 func TestPool_RoundRobin(t *testing.T) {

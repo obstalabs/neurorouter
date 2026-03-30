@@ -20,15 +20,17 @@ func init() {
 	auditCmd.Flags().String("addr", "localhost:4000", "proxy address to query")
 	auditCmd.Flags().Int("last", 10, "number of entries to show")
 	auditCmd.Flags().Bool("json", false, "output as JSON")
+	auditCmd.Flags().String("session", "", "session identifier to inspect")
 }
 
 func runAudit(cmd *cobra.Command, _ []string) error {
 	addr, _ := cmd.Flags().GetString("addr")
 	last, _ := cmd.Flags().GetInt("last")
 	jsonOut, _ := cmd.Flags().GetBool("json")
+	session, _ := cmd.Flags().GetString("session")
 	out := cmd.OutOrStdout()
 
-	resp, err := http.Get("http://" + addr + "/v1/audit")
+	resp, err := http.Get(managementURL(addr, "/v1/audit", session))
 	if err != nil {
 		return fmt.Errorf("connect to proxy at %s: %w", addr, err)
 	}

@@ -18,15 +18,17 @@ var statsCmd = &cobra.Command{
 func init() {
 	statsCmd.Flags().String("addr", "localhost:4000", "proxy address to query")
 	statsCmd.Flags().Bool("json", false, "output as JSON")
+	statsCmd.Flags().String("session", "", "session identifier to inspect")
 }
 
 func runStats(cmd *cobra.Command, _ []string) error {
 	addr, _ := cmd.Flags().GetString("addr")
 	jsonOut, _ := cmd.Flags().GetBool("json")
+	session, _ := cmd.Flags().GetString("session")
 	out := cmd.OutOrStdout()
 
 	// Fetch suggestions.
-	sugResp, err := http.Get("http://" + addr + "/v1/suggestions")
+	sugResp, err := http.Get(managementURL(addr, "/v1/suggestions", session))
 	if err != nil {
 		return fmt.Errorf("connect to proxy at %s: %w", addr, err)
 	}
@@ -37,7 +39,7 @@ func runStats(cmd *cobra.Command, _ []string) error {
 	sugBody, _ := io.ReadAll(sugResp.Body)
 
 	// Fetch audit.
-	auditResp, err := http.Get("http://" + addr + "/v1/audit")
+	auditResp, err := http.Get(managementURL(addr, "/v1/audit", session))
 	if err != nil {
 		return fmt.Errorf("fetch audit: %w", err)
 	}

@@ -122,6 +122,8 @@ neurorouter config       # manage configuration
 neurorouter version      # print version
 ```
 
+For strict isolation across concurrent clients, set `X-Neurorouter-Session` on proxied requests and pass the same value to `neurorouter audit --session ...`, `neurorouter stats --session ...`, or `neurorouter dnd --session ...`. Without an explicit selector, management views use the default local session bucket.
+
 ## Repository Layout
 
 - `cmd/neurorouter` contains the CLI entrypoint and command wiring

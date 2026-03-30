@@ -68,9 +68,10 @@ type Proxy struct {
 	health   *HealthTracker
 	limiters map[string]*rateLimiter // key: target BaseURL
 	poolIdx  map[string]*uint64      // round-robin counter per model
-	pipeline *Pipeline               // nil = no processing (backward compat)
-	audit    *auditLog               // transformation audit log
-	dnd      *DND
+	pipeline *Pipeline        // default session runtime (kept for test helpers)
+	audit    *auditLog        // default session runtime (kept for test helpers)
+	dnd      *DND             // default session runtime (kept for test helpers)
+	sessions *sessionRegistry // session-scoped runtime state
 }
 
 type targetSelection struct {
@@ -81,6 +82,8 @@ type targetSelection struct {
 
 // NewProxy creates a new proxy server.
 func NewProxy(cfg ProxyConfig) *Proxy {
+	defaultRuntime := newSessionRuntime(cfg)
+
 	p := &Proxy{
 		cfg: cfg,
 		client: &http.Client{
@@ -89,7 +92,9 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 		health:   NewHealthTracker(0, 0),
 		limiters: make(map[string]*rateLimiter),
 		poolIdx:  make(map[string]*uint64),
-		dnd:      NewDND(),
+		pipeline: defaultRuntime.pipeline,
+		audit:    defaultRuntime.audit,
+		dnd:      defaultRuntime.dnd,
 	}
 
 	// Initialize rate limiters for pool targets.
@@ -103,15 +108,7 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 		}
 	}
 
-	// Initialize pipeline (protect → purify).
-	p.pipeline = NewPipeline(PipelineConfig{
-		Filters:    cfg.Filters,
-		Protection: cfg.Protection,
-		Neurocache: cfg.Neurocache,
-	})
-
-	// Initialize audit log.
-	p.audit = newAuditLog(100)
+	p.sessions = newSessionRegistry(cfg, defaultRuntime)
 
 	return p
 }
@@ -208,20 +205,22 @@ func (p *Proxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-func (p *Proxy) handleSuggestions(w http.ResponseWriter, _ *http.Request) {
+func (p *Proxy) handleSuggestions(w http.ResponseWriter, r *http.Request) {
+	runtime := p.runtimeForManagement(r)
 	w.Header().Set("Content-Type", "application/json")
-	if p.pipeline == nil {
+	if runtime.pipeline == nil {
 		_, _ = w.Write([]byte(`{"suggestions":[]}`))
 		return
 	}
-	suggestions := p.filteredSuggestions()
+	suggestions := p.filteredSuggestions(runtime)
 	data, _ := json.Marshal(map[string]any{"suggestions": suggestions})
 	_, _ = w.Write(data)
 }
 
-func (p *Proxy) handleAudit(w http.ResponseWriter, _ *http.Request) {
+func (p *Proxy) handleAudit(w http.ResponseWriter, r *http.Request) {
+	runtime := p.runtimeForManagement(r)
 	w.Header().Set("Content-Type", "application/json")
-	entries := p.audit.Entries()
+	entries := runtime.audit.Entries()
 	if entries == nil {
 		entries = []AuditEntry{}
 	}
@@ -229,16 +228,18 @@ func (p *Proxy) handleAudit(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(data)
 }
 
-func (p *Proxy) handleDNDStatus(w http.ResponseWriter, _ *http.Request) {
+func (p *Proxy) handleDNDStatus(w http.ResponseWriter, r *http.Request) {
+	runtime := p.runtimeForManagement(r)
 	w.Header().Set("Content-Type", "application/json")
-	if p.dnd == nil {
+	if runtime.dnd == nil {
 		_ = json.NewEncoder(w).Encode(DNDSnapshot{Source: DNDSourceOff, Status: "off"})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(p.dnd.Snapshot())
+	_ = json.NewEncoder(w).Encode(runtime.dnd.Snapshot())
 }
 
 func (p *Proxy) handleDNDToggle(w http.ResponseWriter, r *http.Request) {
+	runtime := p.runtimeForManagement(r)
 	var req struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -247,34 +248,34 @@ func (p *Proxy) handleDNDToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.dnd != nil {
-		p.dnd.SetManual(req.Enabled)
+	if runtime.dnd != nil {
+		runtime.dnd.SetManual(req.Enabled)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if p.dnd == nil {
+	if runtime.dnd == nil {
 		_ = json.NewEncoder(w).Encode(DNDSnapshot{Source: DNDSourceOff, Status: "off"})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(p.dnd.Snapshot())
+	_ = json.NewEncoder(w).Encode(runtime.dnd.Snapshot())
 }
 
-func (p *Proxy) filteredSuggestions() []Suggestion {
-	if p.pipeline == nil {
+func (p *Proxy) filteredSuggestions(runtime *sessionRuntime) []Suggestion {
+	if runtime == nil || runtime.pipeline == nil {
 		return []Suggestion{}
 	}
 
-	suggestions := p.pipeline.Suggestions()
+	suggestions := runtime.pipeline.Suggestions()
 	if len(suggestions) == 0 {
 		return []Suggestion{}
 	}
-	if p.dnd == nil {
+	if runtime.dnd == nil {
 		return append([]Suggestion(nil), suggestions...)
 	}
 
 	filtered := make([]Suggestion, 0, len(suggestions))
 	for _, suggestion := range suggestions {
-		if !p.dnd.ShouldSuppress(suggestion) {
+		if !runtime.dnd.ShouldSuppress(suggestion) {
 			filtered = append(filtered, suggestion)
 		}
 	}
@@ -291,13 +292,15 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	runtime := p.runtimeForSession(requestSessionKey(r, rawBody))
+
 	var req ResponsesRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	if p.dnd != nil {
-		p.dnd.RecordRequest()
+	if runtime.dnd != nil {
+		runtime.dnd.RecordRequest()
 	}
 
 	requirements := DeriveRequirements(&req)
@@ -323,14 +326,14 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	// Pipeline: protect (secrets) → purify (noise).
 	var pipeResult *PipelineResult
-	if p.pipeline != nil {
+	if runtime.pipeline != nil {
 		adapter := SelectFilterAdapter(selection.Capabilities, filteredMsgs)
 		var pipeErr error
-		filteredMsgs, pipeResult, pipeErr = p.pipeline.Process(filteredMsgs, adapter)
+		filteredMsgs, pipeResult, pipeErr = runtime.pipeline.Process(filteredMsgs, adapter)
 		if pipeErr != nil {
 			// Record blocked request in audit.
-			if p.audit != nil && pipeResult != nil {
-				p.audit.Record(AuditEntry{
+			if runtime.audit != nil && pipeResult != nil {
+				runtime.audit.Record(AuditEntry{
 					Timestamp:    timeNow(),
 					Model:        req.Model,
 					BytesBefore:  pipeResult.BytesBefore,
@@ -341,8 +344,8 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 					Blocked:      true,
 				})
 			}
-			if p.dnd != nil {
-				p.dnd.RecordError()
+			if runtime.dnd != nil {
+				runtime.dnd.RecordError()
 			}
 			writeError(w, http.StatusForbidden, "request blocked: "+pipeErr.Error())
 			return
@@ -356,13 +359,13 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 			"bytes_before", pipeResult.BytesBefore,
 			"bytes_after", pipeResult.BytesAfter,
 			"filters", pipeResult.FiltersRun)
-		if suggestions := p.filteredSuggestions(); len(suggestions) > 0 {
+		if suggestions := p.filteredSuggestions(runtime); len(suggestions) > 0 {
 			w.Header().Set("X-Neurorouter-Suggestions", fmt.Sprintf("%d", len(suggestions)))
 		}
 
 		// Record transformation in audit log.
-		if p.audit != nil {
-			p.audit.Record(AuditEntry{
+		if runtime.audit != nil {
+			runtime.audit.Record(AuditEntry{
 				Timestamp:    timeNow(),
 				Model:        req.Model,
 				BytesBefore:  pipeResult.BytesBefore,
@@ -449,8 +452,8 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	upResp, err := p.client.Do(upReq)
 	if err != nil {
 		p.health.RecordFailure(selection.Target.BaseURL)
-		if p.dnd != nil {
-			p.dnd.RecordError()
+		if runtime.dnd != nil {
+			runtime.dnd.RecordError()
 		}
 		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
@@ -465,8 +468,8 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	// pass through upstream errors
 	if upResp.StatusCode >= 400 {
-		if p.dnd != nil {
-			p.dnd.RecordError()
+		if runtime.dnd != nil {
+			runtime.dnd.RecordError()
 		}
 		w.Header().Set("Content-Type", upResp.Header.Get("Content-Type"))
 		w.WriteHeader(upResp.StatusCode)
@@ -488,6 +491,21 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	} else {
 		p.handleNonStreamingResponse(w, upResp)
 	}
+}
+
+func (p *Proxy) runtimeForManagement(r *http.Request) *sessionRuntime {
+	return p.runtimeForSession(managementSessionKey(r))
+}
+
+func (p *Proxy) runtimeForSession(sessionKey string) *sessionRuntime {
+	if p.sessions == nil {
+		return &sessionRuntime{
+			pipeline: p.pipeline,
+			audit:    p.audit,
+			dnd:      p.dnd,
+		}
+	}
+	return p.sessions.runtime(sessionKey)
 }
 
 func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, upResp *http.Response) {

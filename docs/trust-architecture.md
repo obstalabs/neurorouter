@@ -60,7 +60,9 @@ Every filter and protection rule is deterministic. No ML, no confidence scores, 
 - Secret detection uses structural patterns (prefix-based, not heuristic)
 - Every transformation is logged: what was removed, which filter, how many bytes
 
-The `/v1/audit` endpoint shows a complete record of all transformations:
+The management state that backs `/v1/audit`, `/v1/suggestions`, and `/v1/dnd` is session-scoped. For concurrent clients on one proxy, send `X-Neurorouter-Session` on request traffic and query the same session with `?session=<id>` or the matching CLI flag. Without an explicit selector, the proxy uses the default local session bucket.
+
+The `/v1/audit` endpoint shows the transformation record for the selected session:
 
 ```json
 {

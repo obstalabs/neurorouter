@@ -93,6 +93,27 @@ func TestRunDND_Toggle(t *testing.T) {
 	}
 }
 
+func TestRunDND_UsesSessionQuery(t *testing.T) {
+	var seen string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"active":false,"manual":false,"source":"off","status":"off"}`))
+	}))
+	defer server.Close()
+
+	cmd := newDNDTestCommand()
+	mustSetFlag(t, cmd, "addr", strings.TrimPrefix(server.URL, "http://"))
+	mustSetFlag(t, cmd, "session", "codex-main")
+
+	if err := runDND(cmd, nil); err != nil {
+		t.Fatalf("runDND: %v", err)
+	}
+
+	if seen != "session=codex-main" {
+		t.Fatalf("query: got %q, want session=codex-main", seen)
+	}
+}
+
 func newDNDTestCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "dnd"}
 	cmd.SetOut(&strings.Builder{})
