@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0] - 2026-03-29
+## [0.1.0] - 2026-03-31
 
 ### Added
 - Translation proxy: Responses API to Chat Completions with streaming support
@@ -17,3 +17,10 @@
 - Audit log and dry-run mode for trust verification
 - CLI with Cobra: proxy, stats, explain, audit, dnd, version
 - Zero-config first-run with auto-detection from API key env vars
+
+### Fixed
+- Default bind stays on loopback and management endpoints remain opt-in on public listens
+- Runtime config precedence is wired into proxy startup for supported community settings
+- Self-update verifies checksums and installs extracted platform binaries instead of archive blobs
+- Live pipeline uses provider-aware adapters and native Responses passthrough for compatible upstreams
+- Audit, suggestions, and DND state are isolated per session when clients send a session selector
