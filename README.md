@@ -55,7 +55,7 @@ Universal filters such as `oversized_blocks` and `stale_reads` apply across prov
 
 **Preserve semantics** — Codex/OpenAI clients can stay on the native Responses wire path when the selected upstream supports it. For simpler text-only requests against Chat Completions targets, NeuroRouter can still fall back to compatibility translation.
 
-Works with Claude Code, Codex, Aider, Cursor, Continue.dev, and any tool that supports API base URL override.
+Designed for Claude Code, Codex, Aider, Cursor, Continue.dev, and other clients that support API base URL override. Verified client-path coverage is tracked separately as the community test matrix expands.
 
 ## Licensing Model
 

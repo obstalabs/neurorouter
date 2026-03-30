@@ -155,7 +155,7 @@ Commands use imperative verbs when taking action, nouns when displaying state:
 
 | Pattern | Example | Why |
 |---------|---------|-----|
-| Action → verb | `apply`, `explain` | "do this thing" |
+| Action → verb | `explain` | "do this thing" |
 | State → noun | `stats`, `audit` | "show me this thing" |
 | Toggle → noun | `dnd` | short, memorable |
 | Default → implied | `neurorouter` = `proxy` | most common action needs no verb |
