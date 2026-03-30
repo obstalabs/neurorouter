@@ -13,7 +13,7 @@ import (
 var dndCmd = &cobra.Command{
 	Use:   "dnd [on|off]",
 	Short: "Toggle do-not-disturb mode on the running proxy",
-	Long:  "When DND is active, the proxy suppresses all suggestions. Only critical credential leaks break through.",
+	Long:  "When DND is active, the proxy suppresses non-critical suggestions. Only critical safety signals break through.",
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runDND,
 }

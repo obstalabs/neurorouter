@@ -10,7 +10,7 @@ If you explicitly opt into a public bind, any client that can reach the proxy ca
 
 ## Architecture Guarantees
 
-1. **No key inspection**: Authorization header is passed through untouched. The proxy operates on message content only
+1. **No key inspection**: Authorization header is passed through untouched. The proxy operates on request content while leaving auth handling separate
 2. **No outbound calls**: the binary talks only to your configured upstream endpoint. Zero telemetry, zero phone-home
 3. **Loopback by default**: the default bind is `127.0.0.1:4000`; non-loopback binds require explicit opt-in
 4. **Deterministic transforms**: every filter operation is visible via `--dry-run` and the local `/v1/audit` endpoint
