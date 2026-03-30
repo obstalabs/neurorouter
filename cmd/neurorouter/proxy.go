@@ -27,8 +27,8 @@ var providers = []struct {
 
 var proxyCmd = &cobra.Command{
 	Use:   "proxy",
-	Short: "Start the translation proxy",
-	Long:  "Start the Responses API to Chat Completions translation proxy with filtering and secret detection.",
+	Short: "Start the local proxy",
+	Long:  "Start the local proxy with filtering, secret protection, and compatibility handling for supported upstreams.",
 	RunE:  runProxy,
 }
 

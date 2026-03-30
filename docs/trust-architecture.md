@@ -24,7 +24,7 @@ Nothing leaves your machine except the locally prepared request over HTTPS to yo
 
 The Authorization header is forwarded at the HTTP transport layer. NeuroRouter never parses, decodes, stores, or logs it.
 
-The proxy operates on message content (`[]ChatMessage`), not on HTTP headers. The key passthrough happens in a single line of code:
+The proxy operates on request content, not on HTTP authorization data. For Responses-native clients it preserves structured items and only rewrites text-bearing content; for compatibility paths it translates the message payload while leaving the header handling separate. The key passthrough happens in the outbound HTTP request setup, not inside the filtering pipeline:
 
 ```go
 upReq.Header.Set("Authorization", "Bearer "+target.APIKey)
@@ -120,7 +120,8 @@ lsof -i -P | grep neurorouter
 - Does not log request or response content (only transformation metadata)
 - Does not make outbound network calls beyond forwarding to configured upstream
 - Does not use ML or probabilistic methods for any decision
-- Does not persist data to disk (session-scoped memory only)
+- Does not persist API keys or raw request/response content to disk
+- May persist local structural state such as counters, workflows, and DND/session metadata in the local SQLite state store
 - Does not require an account, registration, or authentication to use
 - Does not phone home, check for updates, or validate licenses at runtime
 

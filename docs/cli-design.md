@@ -17,7 +17,6 @@ neurorouter                    # start proxy (default command)
 neurorouter proxy              # start proxy (explicit)
 neurorouter stats              # show session stats (OPS, savings, suggestions)
 neurorouter explain <pattern>  # explain what a detected pattern means
-neurorouter apply <suggestion> # auto-install a suggested fix (future)
 neurorouter dnd                # toggle do-not-disturb (suppress suggestions)
 neurorouter audit              # show transformation audit log
 neurorouter version            # print version
@@ -83,9 +82,12 @@ Session stats (23 requests)
   Suggestions: 3
 
 Suggestions:
-  [high]   stale_reads: /src/proxy.go read 8 times → neurorouter apply stale-reads
-  [medium] thinking_bloat: 22% of token spend → neurorouter --filters thinking
-  [low]    reminder_spam: 3x duplicated → neurorouter --filters system_reminders
+  [high]   stale_reads: /src/proxy.go read 8 times
+           → cache or consolidate repeated reads in the client workflow
+  [medium] thinking_bloat: 22% of token spend
+           → keep NeuroRouter filters enabled and compact earlier
+  [low]    reminder_spam: 3x duplicated
+           → keep NeuroRouter filters enabled (default behavior)
 ```
 
 ### `neurorouter explain <pattern>`
@@ -105,23 +107,14 @@ Your session reads the same file multiple times. Each read consumes tokens
 but provides no new information after the first read.
 
 Fix: install a read-cache hook that caches file contents within a session.
-  → neurorouter apply stale-reads
+  → review repeated reads with neurorouter audit and your client hooks
 
 Estimated savings: 4KB per duplicate read (~$0.003 per read at Sonnet pricing)
 ```
 
-### `neurorouter apply <suggestion>`
-
-Auto-install a suggested fix. Future command — not yet implemented.
-
-```bash
-neurorouter apply stale-reads      # installs read-cache hook
-neurorouter apply compact-threshold # installs /compact at 35K tokens
-```
-
 ### `neurorouter dnd`
 
-Toggle do-not-disturb mode. When active, the proxy suppresses suggestion headers and log output.
+Toggle do-not-disturb mode. When active, the proxy suppresses non-critical suggestion output while still allowing high-severity safety signals through.
 
 ```bash
 neurorouter dnd          # toggle DND
@@ -151,7 +144,7 @@ Last 3 transformations:
 ### `neurorouter version`
 
 ```
-neurorouter v0.1.0
+neurorouter dev
 ```
 
 ## Naming Rules

@@ -116,8 +116,8 @@ func TestWorkflowDetector_SkillBodyFormat(t *testing.T) {
 	if !contains(body, "Step 1: Read") {
 		t.Error("expected Step 1 in body")
 	}
-	if !contains(body, "neurorouter apply") {
-		t.Error("expected install instruction in body")
+	if !contains(body, "Suggested workflow name: read-edit-bash") {
+		t.Error("expected workflow naming guidance in body")
 	}
 }
 

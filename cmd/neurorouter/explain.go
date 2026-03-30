@@ -24,7 +24,7 @@ var explanations = map[string]struct {
 	"stale_reads": {
 		title:       "stale_reads — repeated file reads without intervening writes",
 		description: "Your session reads the same file multiple times. Each read consumes tokens but provides no new information after the first read.",
-		fix:         "install a read-cache hook that caches file contents within a session.\n  → neurorouter apply stale-reads",
+		fix:         "cache file contents in your client workflow or compact after the first full read.\n  → review repeated reads with neurorouter audit or stats",
 		savings:     "~4KB per duplicate read (~$0.003 per read at Sonnet pricing)",
 	},
 	"thinking_bloat": {
@@ -42,19 +42,19 @@ var explanations = map[string]struct {
 	"context_bloat": {
 		title:       "context_bloat — high percentage of context is noise",
 		description: "More than 25% of your request content is being filtered out as noise. This means you're paying for tokens that carry no signal.",
-		fix:         "enable all filters and consider using /compact more frequently.\n  → neurorouter apply compact-threshold",
+		fix:         "keep filters enabled and compact earlier in the client session.\n  → use your client's compact or summarize flow before the context snowballs",
 		savings:     "proportional to noise percentage, often $0.05-0.50 per request",
 	},
 	"request_repeat": {
 		title:       "request_repeat — identical prompts sent multiple times",
 		description: "The same user message (>100 chars) was sent 3+ times. This could indicate a retry loop, stale cache, or repeated manual action.",
-		fix:         "cache the response or use a deterministic approach for repeated queries.\n  → neurorouter apply response-cache",
+		fix:         "cache repeated queries or stop the retry loop at the client/tool layer.\n  → inspect recent repeats with neurorouter stats or audit",
 		savings:     "full cost of each duplicate request",
 	},
 	"large_tool_output": {
 		title:       "large_tool_output — tool results exceeding 10KB",
 		description: "Multiple tool outputs exceed 10KB. Large outputs consume significant context window and token budget without proportional value.",
-		fix:         "set max tool output size policy to truncate large results.\n  → neurorouter proxy --max-block-bytes 10240",
+		fix:         "trim large tool output before it reaches the model.\n  → prefer narrower file reads, shorter command output, or smaller diffs in the client workflow",
 		savings:     "proportional to output size, often significant for file reads and command outputs",
 	},
 }

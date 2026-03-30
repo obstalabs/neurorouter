@@ -19,7 +19,7 @@ import (
 // DefaultListenAddress keeps the proxy on loopback by default.
 const DefaultListenAddress = "127.0.0.1:4000"
 
-// Target describes an upstream Chat Completions API endpoint.
+// Target describes an upstream API endpoint.
 type Target struct {
 	BaseURL string // e.g. "https://api.deepseek.com"
 	APIKey  string // resolved API key (not "env:...")
@@ -58,7 +58,7 @@ type RequestEvent struct {
 	Blocked      bool
 }
 
-// Proxy is the Responses API → Chat Completions translation proxy.
+// Proxy is the local request-cleaning and forwarding proxy.
 type Proxy struct {
 	cfg      ProxyConfig
 	srv      *http.Server

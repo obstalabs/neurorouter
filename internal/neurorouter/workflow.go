@@ -168,6 +168,7 @@ func generateSkillBody(name string, steps []string) string {
 		fmt.Fprintf(&b, "# Step %d: %s\n", i+1, step)
 	}
 
-	b.WriteString("\n# To install: neurorouter apply " + name + "\n")
+	b.WriteString("\n# Suggested workflow name: " + name + "\n")
+	b.WriteString("# Review and install this workflow in your client or local tooling.\n")
 	return b.String()
 }

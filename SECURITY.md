@@ -14,7 +14,7 @@ If you explicitly opt into a public bind, any client that can reach the proxy ca
 2. **No outbound calls**: the binary talks only to your configured upstream endpoint. Zero telemetry, zero phone-home
 3. **Loopback by default**: the default bind is `127.0.0.1:4000`; non-loopback binds require explicit opt-in
 4. **Deterministic transforms**: every filter operation is visible via `--dry-run` and the local `/v1/audit` endpoint
-5. **No persistence**: session data exists in memory only. Nothing is written to disk unless you configure it
+5. **Local-only persistence**: API keys and request content are not written to disk, but the community edition can keep local structural state such as pattern counts and DND/session metadata in `~/.neurorouter/state.db`
 
 ## Verifying These Claims
 
