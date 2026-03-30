@@ -16,6 +16,8 @@ All contributions require signing the [Contributor License Agreement](docs/CLA.m
 6. Commit with a conventional message: `feat: add feature`
 7. Push and open a pull request
 
+Before starting a large change, check that it belongs in the public community repo. New product features do not land in this repository by default. If your idea expands the community boundary rather than maintaining the current edition, open an issue first and reference the work order that approves that boundary change.
+
 ## Commit messages
 
 Format: `type: concise imperative statement`
@@ -35,10 +37,11 @@ One line, max 72 characters. Say what changed, not every detail of how.
 ## What we accept
 
 - Bug fixes with tests
-- Filter improvements (new patterns, better detection)
-- Secret detection rules (new credential types)
-- Rotation recipes (new services)
-- Documentation improvements
+- Security fixes and trust-hardening changes
+- Compatibility updates for supported community clients and providers
+- Improvements to existing community filters and protection rules
+- Documentation, CI, packaging, and release hygiene improvements
+- Non-behavioral refactors that make the community edition easier to maintain
 
 ## What we don't accept
 
@@ -46,6 +49,8 @@ One line, max 72 characters. Say what changed, not every detail of how.
 - ML or probabilistic approaches (deterministic only)
 - Telemetry, analytics, or phone-home behavior
 - Changes that break the trust architecture (see docs/trust-architecture.md)
+- New product features or premium/private capabilities without an explicit work order that expands the community boundary
+- Key-gated functionality, hidden paid features, or code that belongs in `neurorouter-pro`
 
 ## Testing
 
@@ -60,3 +65,12 @@ go build ./cmd/neurorouter
 ## Questions
 
 Open an issue before starting work on large features. This saves everyone time.
+
+## Repo boundary
+
+This repository is `neurorouter-free`, the public AGPL community edition.
+
+- Allowed by default: fixes, security work, compatibility updates, tests, docs, packaging, and maintenance of the existing community feature set
+- Not allowed by default: new premium features, new hosted/control-plane behavior, org/team features, key-gated capability, or roadmap work meant for `neurorouter-pro`
+
+When in doubt, assume the change belongs in `neurorouter-pro` until the community boundary is explicitly updated.

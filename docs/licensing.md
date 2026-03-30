@@ -26,6 +26,8 @@ Commercial terms may cover:
 
 This public repository is the community edition only.
 
+It is also the maintenance-focused community edition. The default rule is simple: preserve and maintain the existing free feature set here, and put new product capability in `neurorouter-pro` unless the public boundary is intentionally expanded first.
+
 Included here under AGPL:
 - local proxy runtime
 - filtering, protection, audit, dry-run, and DND
@@ -40,6 +42,10 @@ Kept out of this repo and reserved for paid/private distribution:
 - team, enterprise, hosted, or control-plane tooling
 
 Important boundary: if code is published in this repository under the AGPL, recipients of that code receive AGPL rights to that code. Commercial terms do not retroactively remove those rights.
+
+Operational rule for maintainers:
+- `neurorouter-free` gets fixes, security work, compatibility updates, docs, tests, packaging, and maintenance of the current community feature set
+- `neurorouter-pro` gets new premium/private product work unless a tracked work order explicitly changes the public boundary
 
 ## What this means for contributors
 

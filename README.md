@@ -61,6 +61,8 @@ Works with Claude Code, Codex, Aider, Cursor, Continue.dev, and any tool that su
 
 This repository is the self-hosted community edition of NeuroRouter.
 
+It is also the maintenance-focused community edition. By default, this repo accepts bug fixes, security fixes, compatibility updates, tests, docs, packaging, and other work that keeps the free edition healthy. New product features do not land here unless the community boundary is intentionally changed in a tracked work order.
+
 - Source code and community binaries from this repo are available under the GNU Affero General Public License v3.0
 - Obsta Labs, LLC also offers commercial licenses for organizations that need non-copyleft terms
 - Commercial agreements may also include support, managed deployment, or hosted offerings described at [neurorouter.dev](https://neurorouter.dev)
@@ -84,6 +86,8 @@ Paid or private-only features do not live in this repository. Those include:
 - context rescue and checkpoint tooling
 - session-awareness and premium spend/risk signals
 - org policy tooling, managed deployments, and hosted control-plane work
+
+If a proposed change adds new product capability instead of maintaining the existing community edition, it belongs in `neurorouter-pro` unless the public boundary is explicitly expanded first.
 
 ## What NeuroRouter is NOT
 
