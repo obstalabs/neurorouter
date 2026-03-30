@@ -1,0 +1,7 @@
+# Build
+/neurorouter
+*.exe
+
+# Notes (local research, not for git)
+notes/
+dist/

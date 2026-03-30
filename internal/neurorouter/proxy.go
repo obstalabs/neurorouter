@@ -1,0 +1,765 @@
+package neurorouter
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+// DefaultListenAddress keeps the proxy on loopback by default.
+const DefaultListenAddress = "127.0.0.1:4000"
+
+// Target describes an upstream Chat Completions API endpoint.
+type Target struct {
+	BaseURL string // e.g. "https://api.deepseek.com"
+	APIKey  string // resolved API key (not "env:...")
+}
+
+// PoolTarget is a Target with optional rate limiting and weight for
+// load balancing within a target pool.
+type PoolTarget struct {
+	Target
+	RateLimit *RateLimit // nil = no rate limit
+	Weight    int        // relative weight for round-robin; 0 = 1
+}
+
+// ProxyConfig holds proxy server configuration.
+type ProxyConfig struct {
+	Listen            string // defaults to 127.0.0.1:4000
+	AllowPublicListen bool   // require explicit opt-in for non-loopback binds
+	ExposeManagement  bool   // expose audit/suggestions on public binds
+	Capabilities      map[string]TargetCapabilities
+	Targets           map[string]Target       // model name → single target (backward compat)
+	TargetPool        map[string][]PoolTarget // model name → multiple targets with load balancing
+	Filters           FilterConfig            // content filter configuration
+	Protection        ProtectConfig           // secret detection configuration
+	Neurocache        NeurocacheConfig        // neurocache configuration
+	DryRun            bool                    // if true, show filtered vs original without sending
+	OnRequest         func(RequestEvent)      // callback for per-request logging (nil = no logging)
+}
+
+// RequestEvent is emitted after each proxied request for CLI output.
+type RequestEvent struct {
+	Model        string
+	BytesBefore  int
+	BytesAfter   int
+	FiltersRun   []string
+	SecretsFound int
+	Blocked      bool
+}
+
+// Proxy is the Responses API → Chat Completions translation proxy.
+type Proxy struct {
+	cfg      ProxyConfig
+	srv      *http.Server
+	client   *http.Client
+	mu       sync.Mutex
+	addr     string
+	health   *HealthTracker
+	limiters map[string]*rateLimiter // key: target BaseURL
+	poolIdx  map[string]*uint64      // round-robin counter per model
+	pipeline *Pipeline               // nil = no processing (backward compat)
+	audit    *auditLog               // transformation audit log
+	dnd      *DND
+}
+
+type targetSelection struct {
+	Model        string
+	Target       Target
+	Capabilities TargetCapabilities
+}
+
+// NewProxy creates a new proxy server.
+func NewProxy(cfg ProxyConfig) *Proxy {
+	p := &Proxy{
+		cfg: cfg,
+		client: &http.Client{
+			Timeout: 10 * time.Minute,
+		},
+		health:   NewHealthTracker(0, 0),
+		limiters: make(map[string]*rateLimiter),
+		poolIdx:  make(map[string]*uint64),
+		dnd:      NewDND(),
+	}
+
+	// Initialize rate limiters for pool targets.
+	for model, targets := range cfg.TargetPool {
+		idx := uint64(0)
+		p.poolIdx[model] = &idx
+		for _, pt := range targets {
+			if pt.RateLimit != nil {
+				p.limiters[pt.BaseURL] = newRateLimiter(*pt.RateLimit)
+			}
+		}
+	}
+
+	// Initialize pipeline (protect → purify).
+	p.pipeline = NewPipeline(PipelineConfig{
+		Filters:    cfg.Filters,
+		Protection: cfg.Protection,
+		Neurocache: cfg.Neurocache,
+	})
+
+	// Initialize audit log.
+	p.audit = newAuditLog(100)
+
+	return p
+}
+
+// Start begins listening. Returns the actual address.
+func (p *Proxy) Start() (string, error) {
+	listenAddr, publicBind, err := normalizeListenAddress(p.cfg.Listen)
+	if err != nil {
+		return "", err
+	}
+	if publicBind && !p.cfg.AllowPublicListen {
+		return "", fmt.Errorf("public listen %s requires explicit opt-in", listenAddr)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/responses", p.handleResponses)
+	mux.HandleFunc("POST /responses", p.handleResponses)
+	mux.HandleFunc("/health", p.handleHealth)
+	if !publicBind || p.cfg.ExposeManagement {
+		mux.HandleFunc("/v1/suggestions", p.handleSuggestions)
+		mux.HandleFunc("/v1/audit", p.handleAudit)
+		mux.HandleFunc("GET /v1/dnd", p.handleDNDStatus)
+		mux.HandleFunc("POST /v1/dnd", p.handleDNDToggle)
+	}
+
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return "", fmt.Errorf("proxy listen %s: %w", listenAddr, err)
+	}
+
+	p.mu.Lock()
+	p.addr = ln.Addr().String()
+	p.srv = &http.Server{Handler: mux}
+	p.mu.Unlock()
+
+	go func() {
+		if err := p.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			slog.Error("proxy server error", "error", err)
+		}
+	}()
+
+	slog.Info("proxy started", "addr", p.addr, "targets", len(p.cfg.Targets))
+	return p.addr, nil
+}
+
+func normalizeListenAddress(addr string) (string, bool, error) {
+	if addr == "" {
+		addr = DefaultListenAddress
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", false, fmt.Errorf("parse listen address %q: %w", addr, err)
+	}
+
+	if host == "" {
+		return net.JoinHostPort("127.0.0.1", port), false, nil
+	}
+
+	if strings.EqualFold(host, "localhost") {
+		return addr, false, nil
+	}
+
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return addr, false, nil
+	}
+
+	return addr, true, nil
+}
+
+// Stop gracefully shuts down the proxy.
+func (p *Proxy) Stop() error {
+	p.mu.Lock()
+	srv := p.srv
+	p.mu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return srv.Shutdown(ctx)
+}
+
+// Addr returns the listening address after Start.
+func (p *Proxy) Addr() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.addr
+}
+
+func (p *Proxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+func (p *Proxy) handleSuggestions(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if p.pipeline == nil {
+		_, _ = w.Write([]byte(`{"suggestions":[]}`))
+		return
+	}
+	suggestions := p.filteredSuggestions()
+	data, _ := json.Marshal(map[string]any{"suggestions": suggestions})
+	_, _ = w.Write(data)
+}
+
+func (p *Proxy) handleAudit(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	entries := p.audit.Entries()
+	if entries == nil {
+		entries = []AuditEntry{}
+	}
+	data, _ := json.Marshal(map[string]any{"entries": entries, "count": len(entries)})
+	_, _ = w.Write(data)
+}
+
+func (p *Proxy) handleDNDStatus(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if p.dnd == nil {
+		_ = json.NewEncoder(w).Encode(DNDSnapshot{Source: DNDSourceOff, Status: "off"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(p.dnd.Snapshot())
+}
+
+func (p *Proxy) handleDNDToggle(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid dnd body: "+err.Error())
+		return
+	}
+
+	if p.dnd != nil {
+		p.dnd.SetManual(req.Enabled)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if p.dnd == nil {
+		_ = json.NewEncoder(w).Encode(DNDSnapshot{Source: DNDSourceOff, Status: "off"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(p.dnd.Snapshot())
+}
+
+func (p *Proxy) filteredSuggestions() []Suggestion {
+	if p.pipeline == nil {
+		return []Suggestion{}
+	}
+
+	suggestions := p.pipeline.Suggestions()
+	if len(suggestions) == 0 {
+		return []Suggestion{}
+	}
+	if p.dnd == nil {
+		return append([]Suggestion(nil), suggestions...)
+	}
+
+	filtered := make([]Suggestion, 0, len(suggestions))
+	for _, suggestion := range suggestions {
+		if !p.dnd.ShouldSuppress(suggestion) {
+			filtered = append(filtered, suggestion)
+		}
+	}
+	if len(filtered) == 0 {
+		return []Suggestion{}
+	}
+	return filtered
+}
+
+func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read request body: "+err.Error())
+		return
+	}
+
+	var req ResponsesRequest
+	if err := json.Unmarshal(rawBody, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if p.dnd != nil {
+		p.dnd.RecordRequest()
+	}
+
+	requirements := DeriveRequirements(&req)
+
+	selection, err := p.resolveTarget(req.Model, requirements)
+	if err != nil {
+		var capabilityErr *CapabilityError
+		if errors.As(err, &capabilityErr) {
+			writeError(w, http.StatusBadRequest, capabilityErr.Error())
+			return
+		}
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
+
+	requestMsgs, err := ExtractRequestMessages(&req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "extract request messages: "+err.Error())
+		return
+	}
+	filteredMsgs := append([]ChatMessage(nil), requestMsgs...)
+	originalMsgs := append([]ChatMessage(nil), requestMsgs...)
+
+	// Pipeline: protect (secrets) → purify (noise).
+	var pipeResult *PipelineResult
+	if p.pipeline != nil {
+		adapter := SelectFilterAdapter(selection.Capabilities, filteredMsgs)
+		var pipeErr error
+		filteredMsgs, pipeResult, pipeErr = p.pipeline.Process(filteredMsgs, adapter)
+		if pipeErr != nil {
+			// Record blocked request in audit.
+			if p.audit != nil && pipeResult != nil {
+				p.audit.Record(AuditEntry{
+					Timestamp:    timeNow(),
+					Model:        req.Model,
+					BytesBefore:  pipeResult.BytesBefore,
+					BytesAfter:   0,
+					BytesRemoved: pipeResult.BytesBefore,
+					SecretsFound: pipeResult.SecretsFound,
+					SecretPolicy: string(pipeResult.SecretPolicy),
+					Blocked:      true,
+				})
+			}
+			if p.dnd != nil {
+				p.dnd.RecordError()
+			}
+			writeError(w, http.StatusForbidden, "request blocked: "+pipeErr.Error())
+			return
+		}
+		if pipeResult.SecretsFound > 0 && pipeResult.SecretPolicy == PolicyWarn {
+			w.Header().Set("X-Neurorouter-Secrets-Detected", fmt.Sprintf("%d", pipeResult.SecretsFound))
+		}
+		slog.Debug("pipeline",
+			"adapter", adapter.Name(),
+			"secrets", pipeResult.SecretsFound,
+			"bytes_before", pipeResult.BytesBefore,
+			"bytes_after", pipeResult.BytesAfter,
+			"filters", pipeResult.FiltersRun)
+		if suggestions := p.filteredSuggestions(); len(suggestions) > 0 {
+			w.Header().Set("X-Neurorouter-Suggestions", fmt.Sprintf("%d", len(suggestions)))
+		}
+
+		// Record transformation in audit log.
+		if p.audit != nil {
+			p.audit.Record(AuditEntry{
+				Timestamp:    timeNow(),
+				Model:        req.Model,
+				BytesBefore:  pipeResult.BytesBefore,
+				BytesAfter:   pipeResult.BytesAfter,
+				BytesRemoved: pipeResult.BytesBefore - pipeResult.BytesAfter,
+				FiltersRun:   pipeResult.FiltersRun,
+				SecretsFound: pipeResult.SecretsFound,
+				SecretPolicy: string(pipeResult.SecretPolicy),
+			})
+		}
+
+		// Emit per-request event for CLI output.
+		if p.cfg.OnRequest != nil {
+			p.cfg.OnRequest(RequestEvent{
+				Model:        req.Model,
+				BytesBefore:  pipeResult.BytesBefore,
+				BytesAfter:   pipeResult.BytesAfter,
+				FiltersRun:   pipeResult.FiltersRun,
+				SecretsFound: pipeResult.SecretsFound,
+			})
+		}
+	}
+
+	// Dry-run mode: return diff without forwarding upstream.
+	if p.cfg.DryRun {
+		result := DryRunResult{
+			Original: originalMsgs,
+			Filtered: filteredMsgs,
+		}
+		if pipeResult != nil {
+			result.BytesBefore = pipeResult.BytesBefore
+			result.BytesAfter = pipeResult.BytesAfter
+			result.BytesRemoved = pipeResult.BytesBefore - pipeResult.BytesAfter
+			result.FiltersRun = pipeResult.FiltersRun
+			result.SecretsFound = pipeResult.SecretsFound
+		}
+		w.Header().Set("Content-Type", "application/json")
+		data, _ := json.Marshal(result)
+		_, _ = w.Write(data)
+		return
+	}
+
+	useResponsesWire := selection.Capabilities.WireAPI == WireAPIResponses
+	body := rawBody
+	upstreamPath := "/v1/responses"
+	if useResponsesWire {
+		if pipeResult != nil {
+			body, err = RewriteResponsesRequest(rawBody, originalMsgs, filteredMsgs)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "rewrite responses request: "+err.Error())
+				return
+			}
+		}
+	} else {
+		chatReq, err := BuildChatRequest(&req, filteredMsgs)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "translate request: "+err.Error())
+			return
+		}
+		body, err = json.Marshal(chatReq)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "marshal request: "+err.Error())
+			return
+		}
+		upstreamPath = "/v1/chat/completions"
+	}
+
+	upstreamURL := strings.TrimRight(selection.Target.BaseURL, "/") + upstreamPath
+	upReq, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create upstream request: "+err.Error())
+		return
+	}
+	upReq.Header.Set("Content-Type", "application/json")
+
+	if selection.Target.APIKey != "" {
+		upReq.Header.Set("Authorization", "Bearer "+selection.Target.APIKey)
+	} else if auth := r.Header.Get("Authorization"); auth != "" {
+		upReq.Header.Set("Authorization", auth)
+	}
+
+	slog.Debug("proxy forwarding", "model", req.Model, "provider", selection.Capabilities.Provider, "upstream", upstreamURL, "stream", req.Stream)
+
+	upResp, err := p.client.Do(upReq)
+	if err != nil {
+		p.health.RecordFailure(selection.Target.BaseURL)
+		if p.dnd != nil {
+			p.dnd.RecordError()
+		}
+		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		return
+	}
+	defer func() { _ = upResp.Body.Close() }()
+
+	if upResp.StatusCode >= 500 {
+		p.health.RecordFailure(selection.Target.BaseURL)
+	} else {
+		p.health.RecordSuccess(selection.Target.BaseURL)
+	}
+
+	// pass through upstream errors
+	if upResp.StatusCode >= 400 {
+		if p.dnd != nil {
+			p.dnd.RecordError()
+		}
+		w.Header().Set("Content-Type", upResp.Header.Get("Content-Type"))
+		w.WriteHeader(upResp.StatusCode)
+		_, _ = io.Copy(w, upResp.Body)
+		return
+	}
+
+	if useResponsesWire {
+		if req.Stream {
+			p.handlePassthroughStreamingResponse(w, upResp)
+		} else {
+			p.handlePassthroughResponse(w, upResp)
+		}
+		return
+	}
+
+	if req.Stream {
+		p.handleStreamingResponse(w, upResp)
+	} else {
+		p.handleNonStreamingResponse(w, upResp)
+	}
+}
+
+func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, upResp *http.Response) {
+	var chatResp ChatCompletionResponse
+	if err := json.NewDecoder(upResp.Body).Decode(&chatResp); err != nil {
+		writeError(w, http.StatusBadGateway, "decode upstream response: "+err.Error())
+		return
+	}
+
+	resp := TranslateResponse(&chatResp)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, upResp *http.Response) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	translator := NewStreamTranslator()
+	scanner := bufio.NewScanner(upResp.Body)
+	// 256KB buffer for large chunks
+	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			break
+		}
+
+		var chunk ChatChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			slog.Debug("proxy: skip unparseable chunk", "error", err)
+			continue
+		}
+
+		events, done := translator.TranslateChunk(&chunk)
+		for _, ev := range events {
+			_, _ = fmt.Fprint(w, ev.Format())
+		}
+		flusher.Flush()
+
+		if done {
+			break
+		}
+	}
+}
+
+func (p *Proxy) handlePassthroughResponse(w http.ResponseWriter, upResp *http.Response) {
+	if contentType := upResp.Header.Get("Content-Type"); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(upResp.StatusCode)
+	_, _ = io.Copy(w, upResp.Body)
+}
+
+func (p *Proxy) handlePassthroughStreamingResponse(w http.ResponseWriter, upResp *http.Response) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	if contentType := upResp.Header.Get("Content-Type"); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	} else {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
+	if cacheControl := upResp.Header.Get("Cache-Control"); cacheControl != "" {
+		w.Header().Set("Cache-Control", cacheControl)
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	if connection := upResp.Header.Get("Connection"); connection != "" {
+		w.Header().Set("Connection", connection)
+	} else {
+		w.Header().Set("Connection", "keep-alive")
+	}
+
+	w.WriteHeader(upResp.StatusCode)
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := upResp.Body.Read(buf)
+		if n > 0 {
+			_, _ = w.Write(buf[:n])
+			flusher.Flush()
+		}
+		if err != nil {
+			if err != io.EOF {
+				slog.Debug("proxy: native stream ended with error", "error", err)
+			}
+			return
+		}
+	}
+}
+
+func (p *Proxy) resolveTarget(model string, req RequestRequirements) (targetSelection, error) {
+	var (
+		allReasons        []string
+		hadConfigured     bool
+		hadCompatiblePath bool
+	)
+
+	// Try pool targets first (multi-target with load balancing).
+	if sel, compatible, reasons, ok := p.resolveFromPool(model, req); ok {
+		return sel, nil
+	} else if compatible {
+		hadConfigured = true
+		hadCompatiblePath = true
+	} else if len(reasons) > 0 {
+		hadConfigured = true
+		allReasons = append(allReasons, reasons...)
+	}
+	if sel, compatible, reasons, ok := p.resolveFromPool("default", req); ok {
+		return sel, nil
+	} else if compatible {
+		hadConfigured = true
+		hadCompatiblePath = true
+	} else if len(reasons) > 0 {
+		hadConfigured = true
+		allReasons = append(allReasons, reasons...)
+	}
+
+	// Fall back to single targets (backward compat).
+	if sel, compatible, reasons, ok := p.resolveSingleTarget(model, req); ok {
+		return sel, nil
+	} else if compatible {
+		hadConfigured = true
+		hadCompatiblePath = true
+	} else if len(reasons) > 0 {
+		hadConfigured = true
+		allReasons = append(allReasons, reasons...)
+	}
+	if sel, compatible, reasons, ok := p.resolveSingleTarget("default", req); ok {
+		return sel, nil
+	} else if compatible {
+		hadConfigured = true
+		hadCompatiblePath = true
+	} else if len(reasons) > 0 {
+		hadConfigured = true
+		allReasons = append(allReasons, reasons...)
+	}
+
+	if hadConfigured && !hadCompatiblePath {
+		return targetSelection{}, &CapabilityError{
+			Model:   model,
+			Reasons: uniqueStrings(allReasons),
+		}
+	}
+
+	return targetSelection{}, fmt.Errorf("no available target for model %q (all exhausted or unhealthy)", model)
+}
+
+// resolveFromPool selects a target from the pool using round-robin,
+// skipping unhealthy or rate-limited targets.
+func (p *Proxy) resolveFromPool(model string, req RequestRequirements) (targetSelection, bool, []string, bool) {
+	pool, ok := p.cfg.TargetPool[model]
+	if !ok || len(pool) == 0 {
+		return targetSelection{}, false, nil, false
+	}
+
+	capability := p.capabilitiesForModel(model, pool[0].Target)
+	result := Compatible(req, capability)
+	if !result.OK {
+		return targetSelection{}, false, result.Reasons, false
+	}
+
+	idx := p.poolIdx[model]
+	n := len(pool)
+
+	// Try each target in round-robin order.
+	for i := 0; i < n; i++ {
+		p.mu.Lock()
+		pos := int(*idx % uint64(n))
+		*idx++
+		p.mu.Unlock()
+
+		pt := pool[pos]
+
+		// Skip unhealthy targets.
+		if !p.health.IsHealthy(pt.BaseURL) {
+			continue
+		}
+
+		// Skip rate-limited targets.
+		if rl, exists := p.limiters[pt.BaseURL]; exists {
+			if !rl.Allow() {
+				continue
+			}
+		}
+
+		return targetSelection{
+			Model:        model,
+			Target:       pt.Target,
+			Capabilities: capability,
+		}, true, nil, true
+	}
+
+	return targetSelection{}, true, nil, false
+}
+
+func (p *Proxy) resolveSingleTarget(model string, req RequestRequirements) (targetSelection, bool, []string, bool) {
+	target, ok := p.cfg.Targets[model]
+	if !ok {
+		return targetSelection{}, false, nil, false
+	}
+
+	capability := p.capabilitiesForModel(model, target)
+	result := Compatible(req, capability)
+	if !result.OK {
+		return targetSelection{}, false, result.Reasons, false
+	}
+
+	return targetSelection{
+		Model:        model,
+		Target:       target,
+		Capabilities: capability,
+	}, true, nil, true
+}
+
+func (p *Proxy) capabilitiesForModel(model string, target Target) TargetCapabilities {
+	if p.cfg.Capabilities != nil {
+		if cap, ok := p.cfg.Capabilities[model]; ok {
+			if cap.Model == "" {
+				cap.Model = model
+			}
+			if cap.Provider == "" {
+				cap.Provider = detectProviderName(target.BaseURL)
+			}
+			if cap.WireAPI == "" {
+				cap.WireAPI = WireAPIChatCompletions
+			}
+			return cap
+		}
+	}
+	return DefaultTargetCapabilities(model, target)
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func writeError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	resp := map[string]any{"error": map[string]any{"message": msg, "code": code}}
+	_ = json.NewEncoder(w).Encode(resp)
+}

@@ -1,0 +1,59 @@
+version: 2
+
+builds:
+  - main: ./cmd/neurorouter
+    binary: neurorouter
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+brews:
+  - repository:
+      owner: ppiankov
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://neurorouter.dev"
+    description: "LLM proxy that cleans, protects, and stabilizes AI sessions before they hit the model"
+    license: "AGPL-3.0"
+    test: |
+      system "#{bin}/neurorouter", "version"
+
+scoops:
+  - repository:
+      owner: ppiankov
+      name: scoop-bucket
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://neurorouter.dev"
+    description: "LLM proxy that cleans, protects, and stabilizes AI sessions before they hit the model"
+    license: "AGPL-3.0"
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
