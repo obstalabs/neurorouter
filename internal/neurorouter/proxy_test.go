@@ -138,6 +138,54 @@ func TestHandleResponses_CodexAliasPath(t *testing.T) {
 	}
 }
 
+func TestHandleResponses_ChatCompletionsPathNotExposed(t *testing.T) {
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"default": {BaseURL: "https://example.invalid"},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	resp, err := http.Post("http://"+addr+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestHandleResponses_AnthropicMessagesPathNotExposed(t *testing.T) {
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"default": {BaseURL: "https://example.invalid"},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	resp, err := http.Post("http://"+addr+"/v1/messages", "application/json", strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status: got %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
 func TestHandleResponses_Streaming(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher := w.(http.Flusher)

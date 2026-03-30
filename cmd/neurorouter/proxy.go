@@ -221,10 +221,11 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(os.Stderr, "  public:  false (loopback only)\n")
 	}
 	if dryRun {
-		fmt.Fprintf(os.Stderr, "  dry-run: enabled (requests will NOT be forwarded)\n")
+	fmt.Fprintf(os.Stderr, "  dry-run: enabled (requests will NOT be forwarded)\n")
 	}
-	fmt.Fprintf(os.Stderr, "\nTo use with Claude Code:\n")
-	fmt.Fprintf(os.Stderr, "  export ANTHROPIC_BASE_URL=http://%s\n\n", addr)
+	fmt.Fprintf(os.Stderr, "\nTo use with a Responses-compatible client:\n")
+	fmt.Fprintf(os.Stderr, "  export OPENAI_BASE_URL=http://%s\n", addr)
+	fmt.Fprintf(os.Stderr, "  # for Codex, prefer a provider profile with wire_api=responses\n\n")
 	fmt.Fprintf(os.Stderr, "Waiting for requests...\n")
 
 	sig := make(chan os.Signal, 1)

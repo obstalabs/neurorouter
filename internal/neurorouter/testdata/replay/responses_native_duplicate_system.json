@@ -1,0 +1,66 @@
+{
+  "name": "responses_native_duplicate_system",
+  "description": "Preserve non-message items while deduplicating repeated system content on the native Responses path.",
+  "capabilities": {
+    "provider": "openai",
+    "wire_api": "responses",
+    "streaming": true,
+    "responses_items": true,
+    "reasoning_items": true
+  },
+  "filters": {
+    "system_reminders": true
+  },
+  "request": {
+    "model": "gpt-5.4",
+    "instructions": "shared system",
+    "input": [
+      {
+        "type": "message",
+        "role": "developer",
+        "content": "shared system"
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "call_123",
+        "output": "stdout",
+        "status": "completed"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "hello"
+      }
+    ],
+    "metadata": {
+      "trace_id": "abc"
+    }
+  },
+  "expected_filters_run": [
+    "system_reminders"
+  ],
+  "expected_body": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "message",
+        "role": "developer",
+        "content": "shared system"
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "call_123",
+        "output": "stdout",
+        "status": "completed"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "hello"
+      }
+    ],
+    "metadata": {
+      "trace_id": "abc"
+    }
+  }
+}

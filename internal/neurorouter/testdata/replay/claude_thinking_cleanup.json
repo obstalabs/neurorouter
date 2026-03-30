@@ -1,0 +1,44 @@
+{
+  "name": "claude_thinking_cleanup",
+  "description": "Remove Claude-style thinking blocks before forwarding to a chat-completions target.",
+  "capabilities": {
+    "provider": "anthropic",
+    "wire_api": "chat_completions",
+    "streaming": true
+  },
+  "filters": {
+    "thinking": true
+  },
+  "request": {
+    "model": "claude-clean",
+    "input": [
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": "<thinking>check notes</thinking>ready"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "continue"
+      }
+    ]
+  },
+  "expected_filters_run": [
+    "thinking"
+  ],
+  "expected_body": {
+    "model": "claude-clean",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "ready"
+      },
+      {
+        "role": "user",
+        "content": "continue"
+      }
+    ],
+    "stream": false
+  }
+}

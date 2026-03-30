@@ -20,10 +20,7 @@ Or download from [releases](https://github.com/ppiankov/neurorouter/releases/lat
 # Start the proxy
 neurorouter
 
-# Point your AI tool at it
-ANTHROPIC_BASE_URL=http://localhost:4000 claude
-
-# Fallback for Codex / OpenAI tools that only support base URL override
+# Fallback for Codex or another Responses-native tool that only supports base URL override
 OPENAI_BASE_URL=http://localhost:4000 codex
 
 # See what would be filtered without sending
@@ -55,7 +52,7 @@ Universal filters such as `oversized_blocks` and `stale_reads` apply across prov
 
 **Preserve semantics** — Codex/OpenAI clients can stay on the native Responses wire path when the selected upstream supports it. For simpler text-only requests against Chat Completions targets, NeuroRouter can still fall back to compatibility translation.
 
-Designed for Claude Code, Codex, Aider, Cursor, Continue.dev, and other clients that support API base URL override. Verified client-path coverage is tracked separately as the community test matrix expands.
+Verified in the community edition for Responses-native clients such as Codex. See [docs/compatibility.md](docs/compatibility.md) for the current test-backed client-path matrix.
 
 ## Licensing Model
 

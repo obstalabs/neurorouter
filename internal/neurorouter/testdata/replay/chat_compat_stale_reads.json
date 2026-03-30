@@ -1,0 +1,49 @@
+{
+  "name": "chat_compat_stale_reads",
+  "description": "Drop stale duplicate file reads before translating to chat completions for compatibility targets.",
+  "capabilities": {
+    "provider": "deepseek",
+    "wire_api": "chat_completions",
+    "streaming": true
+  },
+  "filters": {
+    "stale_reads": true
+  },
+  "request": {
+    "model": "deepseek-chat",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": "{\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/replay.txt\"}}"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "{\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/replay.txt\"}}"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "summarize the file"
+      }
+    ]
+  },
+  "expected_filters_run": [
+    "stale_reads"
+  ],
+  "expected_body": {
+    "model": "deepseek-chat",
+    "messages": [
+      {
+        "role": "user",
+        "content": "{\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/replay.txt\"}}"
+      },
+      {
+        "role": "user",
+        "content": "summarize the file"
+      }
+    ],
+    "stream": false
+  }
+}
