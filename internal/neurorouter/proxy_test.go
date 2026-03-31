@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/websocket"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -187,6 +188,9 @@ func TestHandleModels_ReturnsCodexDiscoveryShape(t *testing.T) {
 			Provider  string  `json:"provider"`
 			WireAPI   WireAPI `json:"wire_api"`
 			Streaming bool    `json:"streaming"`
+			Upgrade   *struct {
+				Model string `json:"model"`
+			} `json:"upgrade"`
 			Reasoning []struct {
 				Effort      string `json:"effort"`
 				Description string `json:"description"`
@@ -223,6 +227,9 @@ func TestHandleModels_ReturnsCodexDiscoveryShape(t *testing.T) {
 	}
 	if len(result.Models[0].Reasoning) == 0 {
 		t.Fatal("expected model discovery to expose supported reasoning levels")
+	}
+	if result.Models[0].Upgrade != nil {
+		t.Fatalf("upgrade: got %+v, want nil", result.Models[0].Upgrade)
 	}
 }
 
@@ -657,6 +664,110 @@ func TestHandleResponses_NativeResponsesStreamingPassthrough(t *testing.T) {
 	}
 	if !strings.Contains(events, "event: response.output_item.done") {
 		t.Fatalf("missing passthrough output item event: %s", events)
+	}
+}
+
+func TestHandleResponsesWebsocket_NativeResponsesStreamingPassthrough(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Accept"); got != "text/event-stream" {
+			t.Fatalf("accept header: got %q, want text/event-stream", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-native\"}}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-native\"}}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	wsURL := "ws://" + addr + "/responses"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	request := map[string]any{
+		"type":                "response.create",
+		"model":               "gpt-5.4",
+		"instructions":        "",
+		"input":               []map[string]any{{"type": "message", "role": "user", "content": "hi"}},
+		"tools":               []any{},
+		"tool_choice":         "auto",
+		"parallel_tool_calls": true,
+		"stream":              true,
+		"store":               true,
+		"include":             []any{},
+		"client_metadata":     map[string]string{"traceparent": "00-test"},
+	}
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, requestBytes); err != nil {
+		t.Fatalf("write websocket request: %v", err)
+	}
+
+	var events []string
+	for len(events) < 3 {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read websocket message: %v", err)
+		}
+		events = append(events, string(message))
+	}
+
+	if _, ok := captured["type"]; ok {
+		t.Fatalf("websocket request type should not be forwarded upstream: %+v", captured)
+	}
+	if _, ok := captured["client_metadata"]; ok {
+		t.Fatalf("websocket client metadata should not be forwarded upstream: %+v", captured)
+	}
+	if !strings.Contains(events[0], `"type":"response.created"`) {
+		t.Fatalf("missing created event: %s", events[0])
+	}
+	if !strings.Contains(events[1], `"type":"response.output_text.delta"`) {
+		t.Fatalf("missing delta event: %s", events[1])
+	}
+	if !strings.Contains(events[2], `"type":"response.completed"`) {
+		t.Fatalf("missing completed event: %s", events[2])
 	}
 }
 

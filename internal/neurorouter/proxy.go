@@ -130,6 +130,8 @@ func (p *Proxy) Start() (string, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /models", p.handleModels)
 	mux.HandleFunc("GET /v1/models", p.handleModels)
+	mux.HandleFunc("GET /v1/responses", p.handleResponsesWebsocket)
+	mux.HandleFunc("GET /responses", p.handleResponsesWebsocket)
 	mux.HandleFunc("POST /v1/responses", p.handleResponses)
 	mux.HandleFunc("POST /responses", p.handleResponses)
 	mux.HandleFunc("/health", p.handleHealth)
@@ -217,32 +219,27 @@ func (p *Proxy) handleModels(w http.ResponseWriter, _ *http.Request) {
 		Description string `json:"description"`
 	}
 	type codexModel struct {
-		ID                         string            `json:"id"`
-		Model                      string            `json:"model"`
+		ID                         string            `json:"id,omitempty"`
+		Model                      string            `json:"model,omitempty"`
 		Slug                       string            `json:"slug"`
-		Name                       string            `json:"name"`
+		Name                       string            `json:"name,omitempty"`
 		Display                    string            `json:"display_name"`
 		Description                string            `json:"description"`
 		Provider                   string            `json:"provider,omitempty"`
 		WireAPI                    WireAPI           `json:"wire_api,omitempty"`
-		Streaming                  bool              `json:"streaming"`
-		DefaultReasoningLevel      string            `json:"default_reasoning_level"`
+		Streaming                  bool              `json:"streaming,omitempty"`
+		DefaultReasoningLevel      string            `json:"default_reasoning_level,omitempty"`
 		Reasoning                  []reasoningPreset `json:"supported_reasoning_levels"`
 		ShellType                  string            `json:"shell_type"`
 		Visibility                 string            `json:"visibility"`
-		MinimalClientVersion       [3]int            `json:"minimal_client_version"`
 		SupportedInAPI             bool              `json:"supported_in_api"`
 		Priority                   int               `json:"priority"`
-		Upgrade                    map[string]any    `json:"upgrade"`
+		Upgrade                    any               `json:"upgrade,omitempty"`
 		BaseInstructions           string            `json:"base_instructions"`
 		SupportsReasoningSummary   bool              `json:"supports_reasoning_summaries"`
 		SupportsVerbosity          bool              `json:"support_verbosity"`
-		DefaultVerbosity           string            `json:"default_verbosity"`
-		ApplyPatchToolType         string            `json:"apply_patch_tool_type"`
 		TruncationPolicy           map[string]any    `json:"truncation_policy"`
 		SupportsParallelToolCalls  bool              `json:"supports_parallel_tool_calls"`
-		ContextWindow              int               `json:"context_window"`
-		ReasoningSummaryFormat     string            `json:"reasoning_summary_format"`
 		ExperimentalSupportedTools []string          `json:"experimental_supported_tools"`
 	}
 	type openAIModel struct {
@@ -278,19 +275,14 @@ func (p *Proxy) handleModels(w http.ResponseWriter, _ *http.Request) {
 			},
 			ShellType:                  "shell_command",
 			Visibility:                 "list",
-			MinimalClientVersion:       [3]int{0, 0, 0},
 			SupportedInAPI:             true,
 			Priority:                   0,
-			Upgrade:                    map[string]any{},
+			Upgrade:                    nil,
 			BaseInstructions:           "",
 			SupportsReasoningSummary:   true,
 			SupportsVerbosity:          false,
-			DefaultVerbosity:           "",
-			ApplyPatchToolType:         "freeform",
 			TruncationPolicy:           map[string]any{"mode": "bytes", "limit": 10000},
 			SupportsParallelToolCalls:  true,
-			ContextWindow:              0,
-			ReasoningSummaryFormat:     "experimental",
 			ExperimentalSupportedTools: []string{},
 		})
 		openAIModels = append(openAIModels, openAIModel{
