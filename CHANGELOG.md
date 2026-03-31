@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.2] - 2026-03-31
+
+### Changed
+- Clarified proxy startup hints so the banner reports the active auth mode and prints client guidance that matches the detected upstream
+- Added an explicit Claude quick start example alongside the Responses-compatible Codex setup in the README
+
+## [0.1.1] - 2026-03-31
+
+### Fixed
+- Release workflow now skips Homebrew and Scoop publishing when their tokens are absent instead of failing the entire tagged release
+- GoReleaser uses a separate Scoop token configuration instead of incorrectly reusing the Homebrew tap token
+
 ## [0.1.0] - 2026-03-31
 
 ### Added
