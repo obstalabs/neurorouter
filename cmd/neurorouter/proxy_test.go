@@ -27,6 +27,9 @@ func TestProxyFlagDefaults(t *testing.T) {
 	if got := cmd.Flags().Lookup("expose-management").DefValue; got != "false" {
 		t.Fatalf("expose-management default: got %q, want false", got)
 	}
+	if got := cmd.Flags().Lookup("client-auth").DefValue; got != "false" {
+		t.Fatalf("client-auth default: got %q, want false", got)
+	}
 }
 
 func TestResolveProxySettings_Defaults(t *testing.T) {
@@ -185,7 +188,7 @@ func TestConfigDerivedSettingsDriveRunningProxy(t *testing.T) {
 
 func TestStartupAuthMode(t *testing.T) {
 	t.Run("pass through when proxy has no key", func(t *testing.T) {
-		got := startupAuthMode("", "", "")
+		got := startupAuthMode("", "", "", false)
 		want := "forward client Authorization header (API key or OAuth token)"
 		if got != want {
 			t.Fatalf("auth mode: got %q, want %q", got, want)
@@ -193,7 +196,7 @@ func TestStartupAuthMode(t *testing.T) {
 	})
 
 	t.Run("reports env configured key", func(t *testing.T) {
-		got := startupAuthMode("env:OPENAI_API_KEY", "sk-test", "")
+		got := startupAuthMode("env:OPENAI_API_KEY", "sk-test", "", false)
 		want := "configured on proxy from OPENAI_API_KEY"
 		if got != want {
 			t.Fatalf("auth mode: got %q, want %q", got, want)
@@ -201,10 +204,113 @@ func TestStartupAuthMode(t *testing.T) {
 	})
 
 	t.Run("reports auto detected provider key", func(t *testing.T) {
-		got := startupAuthMode("", "sk-test", "OpenAI")
+		got := startupAuthMode("", "sk-test", "OpenAI", false)
 		want := "configured on proxy (auto-detected from OpenAI credentials)"
 		if got != want {
 			t.Fatalf("auth mode: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("reports forced client auth", func(t *testing.T) {
+		got := startupAuthMode("", "sk-test", "OpenAI", true)
+		want := "forward client Authorization header (API key or OAuth token)"
+		if got != want {
+			t.Fatalf("auth mode: got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestAutoDetectProviderSettings(t *testing.T) {
+	getenv := func(values map[string]string) func(string) string {
+		return func(key string) string {
+			return values[key]
+		}
+	}
+
+	t.Run("explicit openai target does not borrow groq key", func(t *testing.T) {
+		got := autoDetectProviderSettings("https://api.openai.com", "", true, getenv(map[string]string{
+			"GROQ_API_KEY": "groq-key",
+		}))
+
+		if got.Target != "https://api.openai.com" {
+			t.Fatalf("target: got %q", got.Target)
+		}
+		if got.APIKey != "" {
+			t.Fatalf("api key: got %q, want empty", got.APIKey)
+		}
+		if got.TargetProvider != "" {
+			t.Fatalf("target provider: got %q, want empty", got.TargetProvider)
+		}
+		if got.KeyProvider != "" {
+			t.Fatalf("key provider: got %q, want empty", got.KeyProvider)
+		}
+	})
+
+	t.Run("explicit openai target picks matching openai key", func(t *testing.T) {
+		got := autoDetectProviderSettings("https://api.openai.com", "", true, getenv(map[string]string{
+			"OPENAI_API_KEY": "openai-key",
+			"GROQ_API_KEY":   "groq-key",
+		}))
+
+		if got.APIKey != "openai-key" {
+			t.Fatalf("api key: got %q, want openai-key", got.APIKey)
+		}
+		if got.KeyProvider != "OpenAI" {
+			t.Fatalf("key provider: got %q, want OpenAI", got.KeyProvider)
+		}
+		if got.TargetProvider != "" {
+			t.Fatalf("target provider: got %q, want empty", got.TargetProvider)
+		}
+	})
+
+	t.Run("missing target auto-detects both target and key from same provider", func(t *testing.T) {
+		got := autoDetectProviderSettings("", "", true, getenv(map[string]string{
+			"GROQ_API_KEY": "groq-key",
+		}))
+
+		if got.Target != "https://api.groq.com/openai" {
+			t.Fatalf("target: got %q", got.Target)
+		}
+		if got.APIKey != "groq-key" {
+			t.Fatalf("api key: got %q", got.APIKey)
+		}
+		if got.TargetProvider != "Groq" {
+			t.Fatalf("target provider: got %q", got.TargetProvider)
+		}
+		if got.KeyProvider != "Groq" {
+			t.Fatalf("key provider: got %q", got.KeyProvider)
+		}
+	})
+
+	t.Run("client auth mode keeps target but skips matching key", func(t *testing.T) {
+		got := autoDetectProviderSettings("https://api.openai.com", "", false, getenv(map[string]string{
+			"OPENAI_API_KEY": "openai-key",
+		}))
+
+		if got.Target != "https://api.openai.com" {
+			t.Fatalf("target: got %q", got.Target)
+		}
+		if got.APIKey != "" {
+			t.Fatalf("api key: got %q, want empty", got.APIKey)
+		}
+		if got.KeyProvider != "" {
+			t.Fatalf("key provider: got %q, want empty", got.KeyProvider)
+		}
+	})
+
+	t.Run("client auth mode can still infer target from one exported key", func(t *testing.T) {
+		got := autoDetectProviderSettings("", "", false, getenv(map[string]string{
+			"OPENAI_API_KEY": "openai-key",
+		}))
+
+		if got.Target != "https://api.openai.com" {
+			t.Fatalf("target: got %q, want https://api.openai.com", got.Target)
+		}
+		if got.APIKey != "" {
+			t.Fatalf("api key: got %q, want empty", got.APIKey)
+		}
+		if got.TargetProvider != "OpenAI" {
+			t.Fatalf("target provider: got %q, want OpenAI", got.TargetProvider)
 		}
 	})
 }
@@ -227,6 +333,104 @@ func TestStartupClientHint(t *testing.T) {
 		}
 		if !strings.Contains(got, "ANTHROPIC_BASE_URL=http://127.0.0.1:4010") {
 			t.Fatalf("missing ANTHROPIC_BASE_URL hint: %q", got)
+		}
+	})
+}
+
+func TestStartupTargetLabel(t *testing.T) {
+	if got := startupTargetLabel("https://api.openai.com", ""); got != "https://api.openai.com" {
+		t.Fatalf("target label: got %q", got)
+	}
+
+	want := "https://api.groq.com/openai (auto-detected from Groq)"
+	if got := startupTargetLabel("https://api.groq.com/openai", "Groq"); got != want {
+		t.Fatalf("target label: got %q, want %q", got, want)
+	}
+}
+
+func TestAvailableProviderEnvKeys(t *testing.T) {
+	got := availableProviderEnvKeys(func(key string) string {
+		switch key {
+		case "OPENAI_API_KEY":
+			return "openai-key"
+		case "GROQ_API_KEY":
+			return "groq-key"
+		default:
+			return ""
+		}
+	})
+
+	want := []string{"OPENAI_API_KEY", "GROQ_API_KEY"}
+	if len(got) != len(want) {
+		t.Fatalf("keys length: got %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("key %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestStartupAuthWarning(t *testing.T) {
+	t.Run("warns when explicit target has no matching exported key", func(t *testing.T) {
+		got := startupAuthWarning("https://api.openai.com", "", "", []string{"GROQ_API_KEY"}, false)
+		want := "explicit target has no exported OPENAI_API_KEY; using pass-through client auth"
+		if got != want {
+			t.Fatalf("warning: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("silent when proxy key is configured", func(t *testing.T) {
+		got := startupAuthWarning("https://api.openai.com", "env:OPENAI_API_KEY", "openai-key", []string{"OPENAI_API_KEY"}, false)
+		if got != "" {
+			t.Fatalf("warning: got %q, want empty", got)
+		}
+	})
+
+	t.Run("silent in client auth mode", func(t *testing.T) {
+		got := startupAuthWarning("https://api.openai.com", "", "", []string{"OPENAI_API_KEY"}, true)
+		if got != "" {
+			t.Fatalf("warning: got %q, want empty", got)
+		}
+	})
+}
+
+func TestStartupAuthChoice(t *testing.T) {
+	t.Run("offers both choices for explicit target", func(t *testing.T) {
+		got := startupAuthChoice("https://api.openai.com", "", false)
+		want := "use --api-key env:OPENAI_API_KEY for proxy auth, or --client-auth for client Authorization"
+		if got != want {
+			t.Fatalf("choice: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("shows reverse hint in client auth mode", func(t *testing.T) {
+		got := startupAuthChoice("https://api.openai.com", "", true)
+		want := "use --api-key env:OPENAI_API_KEY to pin proxy auth instead"
+		if got != want {
+			t.Fatalf("choice: got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestValidateProxyAuthSelection(t *testing.T) {
+	t.Run("rejects client auth with explicit api key", func(t *testing.T) {
+		err := validateProxyAuthSelection("https://api.openai.com", "env:OPENAI_API_KEY", true, []string{"OPENAI_API_KEY"})
+		if err == nil || err.Error() != "--client-auth cannot be used with --api-key" {
+			t.Fatalf("error: got %v", err)
+		}
+	})
+
+	t.Run("rejects ambiguous target inference for client auth", func(t *testing.T) {
+		err := validateProxyAuthSelection("", "", true, []string{"OPENAI_API_KEY", "GROQ_API_KEY"})
+		if err == nil || err.Error() != "--client-auth requires --target when multiple provider keys are exported" {
+			t.Fatalf("error: got %v", err)
+		}
+	})
+
+	t.Run("allows explicit target in client auth mode", func(t *testing.T) {
+		if err := validateProxyAuthSelection("https://api.openai.com", "", true, []string{"OPENAI_API_KEY", "GROQ_API_KEY"}); err != nil {
+			t.Fatalf("error: got %v", err)
 		}
 	})
 }

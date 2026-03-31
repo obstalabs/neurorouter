@@ -13,16 +13,25 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Known provider endpoints for auto-detection from environment variables.
-var providers = []struct {
+type providerSpec struct {
 	envKey  string
 	baseURL string
 	name    string
-}{
+}
+
+// Known provider endpoints for auto-detection from environment variables.
+var providers = []providerSpec{
 	{"ANTHROPIC_API_KEY", "https://api.anthropic.com", "Anthropic"},
 	{"OPENAI_API_KEY", "https://api.openai.com", "OpenAI"},
 	{"GROQ_API_KEY", "https://api.groq.com/openai", "Groq"},
 	{"DEEPSEEK_API_KEY", "https://api.deepseek.com", "DeepSeek"},
+}
+
+type autoDetectResult struct {
+	Target         string
+	APIKey         string
+	TargetProvider string
+	KeyProvider    string
 }
 
 var proxyCmd = &cobra.Command{
@@ -36,6 +45,7 @@ type proxyRuntimeSettings struct {
 	Listen           string
 	Target           string
 	APIKey           string
+	ClientAuth       bool
 	ProtectPolicy    string
 	PublicBind       bool
 	ExposeManagement bool
@@ -53,6 +63,7 @@ func addProxyFlags(cmd *cobra.Command) {
 	f.Bool("expose-management", false, "expose /v1/audit and /v1/suggestions on public binds")
 	f.String("target", "", "upstream URL (auto-detected from API key env vars if omitted)")
 	f.String("api-key", "", "API key (or env:VAR_NAME; auto-detected if omitted)")
+	f.Bool("client-auth", false, "forward client Authorization header instead of auto-configuring proxy auth")
 	f.String("protect-policy", "warn", "secret policy: block, redact, warn")
 	f.Bool("no-protect", false, "disable secret detection")
 	f.Bool("no-filter", false, "disable content filters")
@@ -88,6 +99,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	exposeManagement := settings.ExposeManagement
 	target := settings.Target
 	apiKey := settings.APIKey
+	clientAuth := settings.ClientAuth
 	protectPolicy := settings.ProtectPolicy
 	noProtect := settings.NoProtect
 	noFilter := settings.NoFilter
@@ -99,22 +111,14 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		apiKey = os.Getenv(strings.TrimPrefix(apiKey, "env:"))
 	}
 
-	// Auto-detect from environment if not specified.
-	detectedProvider := ""
-	if target == "" || apiKey == "" {
-		for _, p := range providers {
-			if key := os.Getenv(p.envKey); key != "" {
-				if target == "" {
-					target = p.baseURL
-				}
-				if apiKey == "" {
-					apiKey = key
-				}
-				detectedProvider = p.name
-				break
-			}
-		}
+	availableAuthEnvKeys := availableProviderEnvKeys(os.Getenv)
+	if err := validateProxyAuthSelection(target, settings.APIKey, clientAuth, availableAuthEnvKeys); err != nil {
+		return err
 	}
+
+	detected := autoDetectProviderSettings(target, apiKey, !clientAuth, os.Getenv)
+	target = detected.Target
+	apiKey = detected.APIKey
 
 	if target == "" {
 		fmt.Fprintln(os.Stderr, "error: no upstream target found")
@@ -202,15 +206,20 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "neurorouter listening on %s\n", addr)
-	if detectedProvider != "" {
-		fmt.Fprintf(os.Stderr, "  target:  %s (auto-detected from %s)\n", target, detectedProvider)
-	} else {
-		fmt.Fprintf(os.Stderr, "  target:  %s\n", target)
-	}
+	fmt.Fprintf(os.Stderr, "  target:  %s\n", startupTargetLabel(target, detected.TargetProvider))
 	fmt.Fprintf(os.Stderr, "  protect: %v (policy: %s)\n", !noProtect, protectPolicy)
 	fmt.Fprintf(os.Stderr, "  filter:  %v\n", !noFilter)
 	fmt.Fprintf(os.Stderr, "  cache:   %v\n", !noCache)
-	fmt.Fprintf(os.Stderr, "  auth:    %s\n", startupAuthMode(settings.APIKey, apiKey, detectedProvider))
+	if len(availableAuthEnvKeys) > 0 {
+		fmt.Fprintf(os.Stderr, "  auth-env: %s\n", strings.Join(availableAuthEnvKeys, ", "))
+	}
+	fmt.Fprintf(os.Stderr, "  auth:    %s\n", startupAuthMode(settings.APIKey, apiKey, detected.KeyProvider, clientAuth))
+	if choice := startupAuthChoice(settings.Target, settings.APIKey, clientAuth); choice != "" {
+		fmt.Fprintf(os.Stderr, "  choose:  %s\n", choice)
+	}
+	if warning := startupAuthWarning(settings.Target, settings.APIKey, apiKey, availableAuthEnvKeys, clientAuth); warning != "" {
+		fmt.Fprintf(os.Stderr, "  warn:    %s\n", warning)
+	}
 	if publicBind {
 		fmt.Fprintf(os.Stderr, "  public:  true\n")
 		if exposeManagement {
@@ -224,7 +233,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	if dryRun {
 		fmt.Fprintf(os.Stderr, "  dry-run: enabled (requests will NOT be forwarded)\n")
 	}
-	fmt.Fprint(os.Stderr, startupClientHint(addr, target, detectedProvider))
+	fmt.Fprint(os.Stderr, startupClientHint(addr, target, detected.TargetProvider))
 	fmt.Fprintf(os.Stderr, "Waiting for requests...\n")
 
 	sig := make(chan os.Signal, 1)
@@ -254,7 +263,113 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func startupAuthMode(rawAPIKeySetting, resolvedAPIKey, detectedProvider string) string {
+func autoDetectProviderSettings(target, apiKey string, allowAutoKey bool, getenv func(string) string) autoDetectResult {
+	result := autoDetectResult{Target: target, APIKey: apiKey}
+
+	if result.Target == "" {
+		for _, provider := range providers {
+			key := getenv(provider.envKey)
+			if key == "" {
+				continue
+			}
+
+			result.Target = provider.baseURL
+			result.TargetProvider = provider.name
+			if allowAutoKey && result.APIKey == "" {
+				result.APIKey = key
+				result.KeyProvider = provider.name
+			}
+			return result
+		}
+		return result
+	}
+
+	if result.APIKey != "" {
+		return result
+	}
+	if !allowAutoKey {
+		return result
+	}
+
+	provider, ok := providerForTarget(result.Target)
+	if !ok {
+		return result
+	}
+
+	if key := getenv(provider.envKey); key != "" {
+		result.APIKey = key
+		result.KeyProvider = provider.name
+	}
+
+	return result
+}
+
+func providerForTarget(target string) (providerSpec, bool) {
+	normalizedTarget := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(target)), "/")
+	for _, provider := range providers {
+		normalizedBase := strings.TrimSuffix(strings.ToLower(provider.baseURL), "/")
+		if normalizedTarget == normalizedBase || strings.HasPrefix(normalizedTarget, normalizedBase+"/") {
+			return provider, true
+		}
+	}
+	return providerSpec{}, false
+}
+
+func availableProviderEnvKeys(getenv func(string) string) []string {
+	keys := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if getenv(provider.envKey) != "" {
+			keys = append(keys, provider.envKey)
+		}
+	}
+	return keys
+}
+
+func startupTargetLabel(target, targetProvider string) string {
+	if targetProvider == "" {
+		return target
+	}
+	return fmt.Sprintf("%s (auto-detected from %s)", target, targetProvider)
+}
+
+func startupAuthChoice(rawTargetSetting, rawAPIKeySetting string, clientAuth bool) string {
+	if rawTargetSetting == "" {
+		return ""
+	}
+
+	provider, ok := providerForTarget(rawTargetSetting)
+	if !ok {
+		return ""
+	}
+
+	if clientAuth {
+		return fmt.Sprintf("use --api-key env:%s to pin proxy auth instead", provider.envKey)
+	}
+	if rawAPIKeySetting != "" {
+		return "use --client-auth to forward client Authorization instead"
+	}
+
+	return fmt.Sprintf("use --api-key env:%s for proxy auth, or --client-auth for client Authorization", provider.envKey)
+}
+
+func startupAuthWarning(rawTargetSetting, rawAPIKeySetting, resolvedAPIKey string, availableAuthEnvKeys []string, clientAuth bool) string {
+	if clientAuth || rawAPIKeySetting != "" || rawTargetSetting == "" || resolvedAPIKey != "" || len(availableAuthEnvKeys) == 0 {
+		return ""
+	}
+
+	provider, ok := providerForTarget(rawTargetSetting)
+	if !ok {
+		return "explicit target has no matching exported provider key; using pass-through client auth"
+	}
+
+	return fmt.Sprintf("explicit target has no exported %s; using pass-through client auth", provider.envKey)
+}
+
+func startupAuthMode(rawAPIKeySetting, resolvedAPIKey, keyProvider string, clientAuth bool) string {
+	if clientAuth {
+		return "forward client Authorization header (API key or OAuth token)"
+	}
+
 	if resolvedAPIKey == "" {
 		return "forward client Authorization header (API key or OAuth token)"
 	}
@@ -267,8 +382,8 @@ func startupAuthMode(rawAPIKeySetting, resolvedAPIKey, detectedProvider string) 
 		return "configured on proxy via flag or config"
 	}
 
-	if detectedProvider != "" {
-		return fmt.Sprintf("configured on proxy (auto-detected from %s credentials)", detectedProvider)
+	if keyProvider != "" {
+		return fmt.Sprintf("configured on proxy (auto-detected from %s credentials)", keyProvider)
 	}
 
 	return "configured on proxy"
@@ -306,6 +421,7 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 		Target:           cfg.Upstream,
 		ProtectPolicy:    cfg.ProtectPolicy,
 		APIKey:           flagString(cmd, "api-key"),
+		ClientAuth:       flagBool(cmd, "client-auth"),
 		PublicBind:       flagBool(cmd, "public"),
 		ExposeManagement: flagBool(cmd, "expose-management"),
 		NoProtect:        flagBool(cmd, "no-protect"),
@@ -326,6 +442,19 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 	}
 
 	return settings, nil
+}
+
+func validateProxyAuthSelection(target, rawAPIKeySetting string, clientAuth bool, availableAuthEnvKeys []string) error {
+	if !clientAuth {
+		return nil
+	}
+	if rawAPIKeySetting != "" {
+		return fmt.Errorf("--client-auth cannot be used with --api-key")
+	}
+	if target == "" && len(availableAuthEnvKeys) > 1 {
+		return fmt.Errorf("--client-auth requires --target when multiple provider keys are exported")
+	}
+	return nil
 }
 
 func listenAddressForPort(port int) string {
