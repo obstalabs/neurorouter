@@ -303,6 +303,11 @@ func TestHandleResponses_ForwardsClientAuthContextHeaders(t *testing.T) {
 	var originator string
 	var version string
 	var searchEligible string
+	var sessionID string
+	var requestID string
+	var subagent string
+	var beta string
+	var turnMetadata string
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
@@ -310,6 +315,11 @@ func TestHandleResponses_ForwardsClientAuthContextHeaders(t *testing.T) {
 		originator = r.Header.Get("Originator")
 		version = r.Header.Get("Version")
 		searchEligible = r.Header.Get("X-Oai-Web-Search-Eligible")
+		sessionID = r.Header.Get("session_id")
+		requestID = r.Header.Get("X-Client-Request-Id")
+		subagent = r.Header.Get("X-OpenAI-Subagent")
+		beta = r.Header.Get("X-Codex-Beta-Features")
+		turnMetadata = r.Header.Get(codexTurnMetadataHeader)
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"resp-client-auth","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}],"status":"completed"}]}`))
@@ -348,6 +358,11 @@ func TestHandleResponses_ForwardsClientAuthContextHeaders(t *testing.T) {
 	req.Header.Set("Originator", "Codex Desktop")
 	req.Header.Set("Version", "0.98.0")
 	req.Header.Set("X-Oai-Web-Search-Eligible", "true")
+	req.Header.Set("session_id", "sess_123")
+	req.Header.Set("X-Client-Request-Id", "req_123")
+	req.Header.Set("X-OpenAI-Subagent", "review")
+	req.Header.Set("X-Codex-Beta-Features", "ws_v2")
+	req.Header.Set(codexTurnMetadataHeader, `{"turn_id":"turn-123"}`)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -373,6 +388,21 @@ func TestHandleResponses_ForwardsClientAuthContextHeaders(t *testing.T) {
 	}
 	if searchEligible != "true" {
 		t.Fatalf("search eligibility header: got %q, want true", searchEligible)
+	}
+	if sessionID != "sess_123" {
+		t.Fatalf("session_id: got %q, want sess_123", sessionID)
+	}
+	if requestID != "req_123" {
+		t.Fatalf("x-client-request-id: got %q, want req_123", requestID)
+	}
+	if subagent != "review" {
+		t.Fatalf("x-openai-subagent: got %q, want review", subagent)
+	}
+	if beta != "ws_v2" {
+		t.Fatalf("x-codex-beta-features: got %q, want ws_v2", beta)
+	}
+	if turnMetadata != `{"turn_id":"turn-123"}` {
+		t.Fatalf("turn metadata: got %q", turnMetadata)
 	}
 }
 
@@ -998,6 +1028,178 @@ func TestHandleResponses_PreservesCodexTurnStateHeader(t *testing.T) {
 	}
 	if capturedHeaders[1] != "turn-http-123" {
 		t.Fatalf("second upstream turn state: got %q, want %q", capturedHeaders[1], "turn-http-123")
+	}
+}
+
+func TestHandleResponses_ForwardsCompatibilityHeadersWithProxyAuth(t *testing.T) {
+	var sessionID string
+	var requestID string
+	var subagent string
+	var beta string
+	var turnMetadata string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionID = r.Header.Get("session_id")
+		requestID = r.Header.Get("X-Client-Request-Id")
+		subagent = r.Header.Get("X-OpenAI-Subagent")
+		beta = r.Header.Get("X-Codex-Beta-Features")
+		turnMetadata = r.Header.Get(codexTurnMetadataHeader)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-http","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL, APIKey: "proxy-key"},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := `{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":"hi"}]}`
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/responses", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("session_id", "sess_456")
+	req.Header.Set("X-Client-Request-Id", "req_456")
+	req.Header.Set("X-OpenAI-Subagent", "review")
+	req.Header.Set("X-Codex-Beta-Features", "ws_v2")
+	req.Header.Set(codexTurnMetadataHeader, `{"turn_id":"turn-456"}`)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if sessionID != "sess_456" {
+		t.Fatalf("session_id: got %q, want sess_456", sessionID)
+	}
+	if requestID != "req_456" {
+		t.Fatalf("x-client-request-id: got %q, want req_456", requestID)
+	}
+	if subagent != "review" {
+		t.Fatalf("x-openai-subagent: got %q, want review", subagent)
+	}
+	if beta != "ws_v2" {
+		t.Fatalf("x-codex-beta-features: got %q, want ws_v2", beta)
+	}
+	if turnMetadata != `{"turn_id":"turn-456"}` {
+		t.Fatalf("turn metadata: got %q", turnMetadata)
+	}
+}
+
+func TestHandleResponsesWebsocket_ForwardsClientMetadataAsHeaders(t *testing.T) {
+	var turnMetadata string
+	var traceparent string
+	var tracestate string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turnMetadata = r.Header.Get(codexTurnMetadataHeader)
+		traceparent = r.Header.Get("Traceparent")
+		tracestate = r.Header.Get("Tracestate")
+
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-native\"}}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-native\"}}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/responses", nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	request := map[string]any{
+		"type":                "response.create",
+		"model":               "gpt-5.4",
+		"instructions":        "",
+		"input":               []map[string]any{{"type": "message", "role": "user", "content": "hi"}},
+		"tools":               []any{},
+		"tool_choice":         "auto",
+		"parallel_tool_calls": true,
+		"stream":              true,
+		"store":               true,
+		"include":             []any{},
+		"client_metadata": map[string]string{
+			"x-codex-turn-metadata":         `{"turn_id":"turn-789"}`,
+			"ws_request_header_traceparent": "00-abc-123-01",
+			"ws_request_header_tracestate":  "vendor=value",
+		},
+	}
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, requestBytes); err != nil {
+		t.Fatalf("write websocket request: %v", err)
+	}
+
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read websocket message: %v", err)
+		}
+		if strings.Contains(string(message), `"type":"response.completed"`) {
+			break
+		}
+	}
+
+	if turnMetadata != `{"turn_id":"turn-789"}` {
+		t.Fatalf("turn metadata: got %q", turnMetadata)
+	}
+	if traceparent != "00-abc-123-01" {
+		t.Fatalf("traceparent: got %q", traceparent)
+	}
+	if tracestate != "vendor=value" {
+		t.Fatalf("tracestate: got %q", tracestate)
 	}
 }
 

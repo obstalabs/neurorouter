@@ -57,7 +57,7 @@ func (p *Proxy) handleResponsesWebsocket(w http.ResponseWriter, r *http.Request)
 }
 
 func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Request, state *responsesWebsocketBridgeState, payload []byte) error {
-	rawBody, err := sanitizeResponsesWebsocketRequest(payload)
+	rawBody, extraHeaders, err := sanitizeResponsesWebsocketRequest(payload)
 	if err != nil {
 		return writeResponsesWebsocketError(conn, http.StatusBadRequest, "invalid_request_error", "invalid websocket request: "+err.Error())
 	}
@@ -160,6 +160,12 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 	}
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("Accept", "text/event-stream")
+	forwardOpenAICompatibilityHeaders(upReq.Header, r.Header)
+	for header, values := range extraHeaders {
+		for _, value := range values {
+			upReq.Header.Add(header, value)
+		}
+	}
 	if state != nil && state.turnState != "" {
 		upReq.Header.Set(codexTurnStateHeader, state.turnState)
 	}
@@ -206,30 +212,67 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 	return relayResponsesSSEToWebsocket(conn, upResp.Body)
 }
 
-func sanitizeResponsesWebsocketRequest(payload []byte) ([]byte, error) {
+func sanitizeResponsesWebsocketRequest(payload []byte) ([]byte, http.Header, error) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &doc); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	rawType, ok := doc["type"]
 	if !ok {
-		return nil, fmt.Errorf("missing type")
+		return nil, nil, fmt.Errorf("missing type")
 	}
 
 	var reqType string
 	if err := json.Unmarshal(rawType, &reqType); err != nil {
-		return nil, fmt.Errorf("decode type: %w", err)
+		return nil, nil, fmt.Errorf("decode type: %w", err)
 	}
 	if reqType != "response.create" {
-		return nil, fmt.Errorf("unsupported websocket request type %q", reqType)
+		return nil, nil, fmt.Errorf("unsupported websocket request type %q", reqType)
+	}
+
+	extraHeaders, err := extractResponsesWebsocketCompatibilityHeaders(doc["client_metadata"])
+	if err != nil {
+		return nil, nil, err
 	}
 
 	delete(doc, "type")
 	delete(doc, "client_metadata")
 	delete(doc, "generate")
 
-	return json.Marshal(doc)
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, extraHeaders, nil
+}
+
+func extractResponsesWebsocketCompatibilityHeaders(raw json.RawMessage) (http.Header, error) {
+	headers := make(http.Header)
+	if len(raw) == 0 {
+		return headers, nil
+	}
+
+	var metadata map[string]string
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil, fmt.Errorf("decode client_metadata: %w", err)
+	}
+
+	for key, value := range metadata {
+		if value == "" {
+			continue
+		}
+		switch strings.ToLower(key) {
+		case strings.ToLower(codexTurnMetadataHeader):
+			headers.Add(codexTurnMetadataHeader, value)
+		case "ws_request_header_traceparent":
+			headers.Add("Traceparent", value)
+		case "ws_request_header_tracestate":
+			headers.Add("Tracestate", value)
+		}
+	}
+
+	return headers, nil
 }
 
 func relayResponsesSSEToWebsocket(conn *websocket.Conn, body io.Reader) error {

@@ -24,6 +24,7 @@ import (
 const DefaultListenAddress = "127.0.0.1:4000"
 
 const codexTurnStateHeader = "X-Codex-Turn-State"
+const codexTurnMetadataHeader = "X-Codex-Turn-Metadata"
 
 // Target describes an upstream API endpoint.
 type Target struct {
@@ -543,6 +544,7 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
+	forwardOpenAICompatibilityHeaders(upReq.Header, r.Header)
 	forwardCodexTurnState(upReq.Header, r.Header)
 
 	if selection.Target.APIKey != "" {
@@ -892,9 +894,26 @@ func forwardClientAuthHeaders(dst, src http.Header) {
 		"Chatgpt-Account-Id",
 		"OpenAI-Organization",
 		"OpenAI-Project",
+	} {
+		for _, value := range src.Values(header) {
+			dst.Add(header, value)
+		}
+	}
+}
+
+func forwardOpenAICompatibilityHeaders(dst, src http.Header) {
+	for _, header := range []string{
+		"session_id",
+		"X-Client-Request-Id",
+		"X-OpenAI-Subagent",
+		"OpenAI-Beta",
+		"X-Codex-Beta-Features",
+		codexTurnStateHeader,
+		codexTurnMetadataHeader,
+		"Traceparent",
+		"Tracestate",
 		"Originator",
 		"Version",
-		"X-Codex-Turn-Metadata",
 		"X-Oai-Web-Search-Eligible",
 	} {
 		for _, value := range src.Values(header) {
