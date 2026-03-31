@@ -3,6 +3,7 @@ package neurorouter
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,9 +12,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // DefaultListenAddress keeps the proxy on loopback by default.
@@ -68,10 +72,10 @@ type Proxy struct {
 	health   *HealthTracker
 	limiters map[string]*rateLimiter // key: target BaseURL
 	poolIdx  map[string]*uint64      // round-robin counter per model
-	pipeline *Pipeline        // default session runtime (kept for test helpers)
-	audit    *auditLog        // default session runtime (kept for test helpers)
-	dnd      *DND             // default session runtime (kept for test helpers)
-	sessions *sessionRegistry // session-scoped runtime state
+	pipeline *Pipeline               // default session runtime (kept for test helpers)
+	audit    *auditLog               // default session runtime (kept for test helpers)
+	dnd      *DND                    // default session runtime (kept for test helpers)
+	sessions *sessionRegistry        // session-scoped runtime state
 }
 
 type targetSelection struct {
@@ -124,6 +128,8 @@ func (p *Proxy) Start() (string, error) {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /models", p.handleModels)
+	mux.HandleFunc("GET /v1/models", p.handleModels)
 	mux.HandleFunc("POST /v1/responses", p.handleResponses)
 	mux.HandleFunc("POST /responses", p.handleResponses)
 	mux.HandleFunc("/health", p.handleHealth)
@@ -203,6 +209,104 @@ func (p *Proxy) Addr() string {
 func (p *Proxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+func (p *Proxy) handleModels(w http.ResponseWriter, _ *http.Request) {
+	type reasoningPreset struct {
+		Effort      string `json:"effort"`
+		Description string `json:"description"`
+	}
+	type codexModel struct {
+		ID                         string            `json:"id"`
+		Model                      string            `json:"model"`
+		Slug                       string            `json:"slug"`
+		Name                       string            `json:"name"`
+		Display                    string            `json:"display_name"`
+		Description                string            `json:"description"`
+		Provider                   string            `json:"provider,omitempty"`
+		WireAPI                    WireAPI           `json:"wire_api,omitempty"`
+		Streaming                  bool              `json:"streaming"`
+		DefaultReasoningLevel      string            `json:"default_reasoning_level"`
+		Reasoning                  []reasoningPreset `json:"supported_reasoning_levels"`
+		ShellType                  string            `json:"shell_type"`
+		Visibility                 string            `json:"visibility"`
+		MinimalClientVersion       [3]int            `json:"minimal_client_version"`
+		SupportedInAPI             bool              `json:"supported_in_api"`
+		Priority                   int               `json:"priority"`
+		Upgrade                    map[string]any    `json:"upgrade"`
+		BaseInstructions           string            `json:"base_instructions"`
+		SupportsReasoningSummary   bool              `json:"supports_reasoning_summaries"`
+		SupportsVerbosity          bool              `json:"support_verbosity"`
+		DefaultVerbosity           string            `json:"default_verbosity"`
+		ApplyPatchToolType         string            `json:"apply_patch_tool_type"`
+		TruncationPolicy           map[string]any    `json:"truncation_policy"`
+		SupportsParallelToolCalls  bool              `json:"supports_parallel_tool_calls"`
+		ContextWindow              int               `json:"context_window"`
+		ReasoningSummaryFormat     string            `json:"reasoning_summary_format"`
+		ExperimentalSupportedTools []string          `json:"experimental_supported_tools"`
+	}
+	type openAIModel struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Created int64  `json:"created"`
+		OwnedBy string `json:"owned_by"`
+	}
+
+	modelNames := p.discoveredModels()
+	codexModels := make([]codexModel, 0, len(modelNames))
+	openAIModels := make([]openAIModel, 0, len(modelNames))
+
+	for _, model := range modelNames {
+		target, _ := p.discoveryTargetForModel(model)
+		capabilities := p.capabilitiesForModel(model, target)
+		codexModels = append(codexModels, codexModel{
+			ID:                    model,
+			Model:                 model,
+			Slug:                  model,
+			Name:                  model,
+			Display:               model,
+			Description:           "NeuroRouter-discovered upstream model",
+			Provider:              capabilities.Provider,
+			WireAPI:               capabilities.WireAPI,
+			Streaming:             capabilities.Streaming,
+			DefaultReasoningLevel: "medium",
+			Reasoning: []reasoningPreset{
+				{Effort: "low", Description: "Low reasoning effort"},
+				{Effort: "medium", Description: "Medium reasoning effort"},
+				{Effort: "high", Description: "High reasoning effort"},
+				{Effort: "xhigh", Description: "Extra high reasoning effort"},
+			},
+			ShellType:                  "shell_command",
+			Visibility:                 "list",
+			MinimalClientVersion:       [3]int{0, 0, 0},
+			SupportedInAPI:             true,
+			Priority:                   0,
+			Upgrade:                    map[string]any{},
+			BaseInstructions:           "",
+			SupportsReasoningSummary:   true,
+			SupportsVerbosity:          false,
+			DefaultVerbosity:           "",
+			ApplyPatchToolType:         "freeform",
+			TruncationPolicy:           map[string]any{"mode": "bytes", "limit": 10000},
+			SupportsParallelToolCalls:  true,
+			ContextWindow:              0,
+			ReasoningSummaryFormat:     "experimental",
+			ExperimentalSupportedTools: []string{},
+		})
+		openAIModels = append(openAIModels, openAIModel{
+			ID:      model,
+			Object:  "model",
+			Created: 0,
+			OwnedBy: capabilities.Provider,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"object": "list",
+		"data":   openAIModels,
+		"models": codexModels,
+	})
 }
 
 func (p *Proxy) handleSuggestions(w http.ResponseWriter, r *http.Request) {
@@ -286,8 +390,13 @@ func (p *Proxy) filteredSuggestions(runtime *sessionRuntime) []Suggestion {
 }
 
 func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
-	rawBody, err := io.ReadAll(r.Body)
+	rawBody, err := readDecodedRequestBody(r)
 	if err != nil {
+		var decodeErr *requestBodyError
+		if errors.As(err, &decodeErr) {
+			writeError(w, decodeErr.StatusCode, decodeErr.Message)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "read request body: "+err.Error())
 		return
 	}
@@ -445,6 +554,7 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		upReq.Header.Set("Authorization", "Bearer "+selection.Target.APIKey)
 	} else if auth := r.Header.Get("Authorization"); auth != "" {
 		upReq.Header.Set("Authorization", auth)
+		forwardClientAuthHeaders(upReq.Header, r.Header)
 	}
 
 	slog.Debug("proxy forwarding", "model", req.Model, "provider", selection.Capabilities.Provider, "upstream", upstreamURL, "stream", req.Stream)
@@ -471,9 +581,25 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		if runtime.dnd != nil {
 			runtime.dnd.RecordError()
 		}
-		w.Header().Set("Content-Type", upResp.Header.Get("Content-Type"))
+		body, _ := io.ReadAll(upResp.Body)
+		if rewritten, ok := oauthCompatibilityError(selection.Target.APIKey, r.Header, upResp.StatusCode, body); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"type":    "invalid_request_error",
+					"code":    "client_auth_unsupported",
+					"message": rewritten,
+				},
+			})
+			return
+		}
+
+		if contentType := upResp.Header.Get("Content-Type"); contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
 		w.WriteHeader(upResp.StatusCode)
-		_, _ = io.Copy(w, upResp.Body)
+		_, _ = w.Write(body)
 		return
 	}
 
@@ -671,6 +797,132 @@ func (p *Proxy) resolveTarget(model string, req RequestRequirements) (targetSele
 	}
 
 	return targetSelection{}, fmt.Errorf("no available target for model %q (all exhausted or unhealthy)", model)
+}
+
+type requestBodyError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *requestBodyError) Error() string {
+	return e.Message
+}
+
+func readDecodedRequestBody(r *http.Request) ([]byte, error) {
+	encoding := normalizedContentEncoding(r.Header.Get("Content-Encoding"))
+
+	switch encoding {
+	case "", "identity":
+		defer func() { _ = r.Body.Close() }()
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		return body, nil
+	case "gzip":
+		defer func() { _ = r.Body.Close() }()
+		reader, err := gzip.NewReader(r.Body)
+		if err != nil {
+			return nil, &requestBodyError{
+				StatusCode: http.StatusBadRequest,
+				Message:    "decode gzip request body: " + err.Error(),
+			}
+		}
+		defer func() { _ = reader.Close() }()
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read gzip request body: %w", err)
+		}
+		return body, nil
+	case "zstd":
+		defer func() { _ = r.Body.Close() }()
+		reader, err := zstd.NewReader(r.Body)
+		if err != nil {
+			return nil, &requestBodyError{
+				StatusCode: http.StatusBadRequest,
+				Message:    "decode zstd request body: " + err.Error(),
+			}
+		}
+		defer reader.Close()
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read zstd request body: %w", err)
+		}
+		return body, nil
+	default:
+		return nil, &requestBodyError{
+			StatusCode: http.StatusUnsupportedMediaType,
+			Message:    "unsupported content encoding: " + encoding,
+		}
+	}
+}
+
+func normalizedContentEncoding(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(strings.Split(value, ",")[0]))
+}
+
+func oauthCompatibilityError(proxyAPIKey string, headers http.Header, statusCode int, body []byte) (string, bool) {
+	if proxyAPIKey != "" || statusCode != http.StatusUnauthorized {
+		return "", false
+	}
+	if headers.Get("Chatgpt-Account-Id") == "" {
+		return "", false
+	}
+	if !bytes.Contains(body, []byte("api.responses.write")) {
+		return "", false
+	}
+
+	return "Codex account-auth pass-through was rejected by the upstream for missing api.responses.write. NeuroRouter community edition supports Codex through an OpenAI API key today; set OPENAI_API_KEY for the client or run the proxy with --api-key env:OPENAI_API_KEY.", true
+}
+
+func forwardClientAuthHeaders(dst, src http.Header) {
+	for _, header := range []string{
+		"Chatgpt-Account-Id",
+		"OpenAI-Organization",
+		"OpenAI-Project",
+		"Originator",
+		"Version",
+		"X-Codex-Turn-Metadata",
+		"X-Oai-Web-Search-Eligible",
+	} {
+		for _, value := range src.Values(header) {
+			dst.Add(header, value)
+		}
+	}
+}
+
+func (p *Proxy) discoveredModels() []string {
+	modelSet := make(map[string]struct{})
+
+	for model := range p.cfg.Targets {
+		modelSet[model] = struct{}{}
+	}
+	for model := range p.cfg.TargetPool {
+		modelSet[model] = struct{}{}
+	}
+	for model := range p.cfg.Capabilities {
+		modelSet[model] = struct{}{}
+	}
+
+	models := make([]string, 0, len(modelSet))
+	for model := range modelSet {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	return models
+}
+
+func (p *Proxy) discoveryTargetForModel(model string) (Target, bool) {
+	if target, ok := p.cfg.Targets[model]; ok {
+		return target, true
+	}
+	if pool := p.cfg.TargetPool[model]; len(pool) > 0 {
+		return pool[0].Target, true
+	}
+	return Target{}, false
 }
 
 // resolveFromPool selects a target from the pool using round-robin,

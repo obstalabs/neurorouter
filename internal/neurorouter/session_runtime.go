@@ -74,8 +74,10 @@ func managementSessionKey(r *http.Request) string {
 }
 
 func requestSessionKey(r *http.Request, rawBody []byte) string {
-	if key := normalizeSessionKey(r.Header.Get(sessionHeaderName)); key != "" {
-		return key
+	for _, header := range []string{sessionHeaderName, "Session_id", "Session-Id", "X-Session-Id"} {
+		if key := normalizeSessionKey(r.Header.Get(header)); key != "" {
+			return key
+		}
 	}
 	if key := sessionKeyFromMetadata(rawBody); key != "" {
 		return key

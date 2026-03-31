@@ -8,6 +8,7 @@ The rule is simple: if a client path is marked verified here, there is test cove
 
 - Codex and other Responses-native clients using `POST /v1/responses`
 - Codex-compatible clients using `POST /responses`
+- zstd-compressed Responses requests from built-in Codex/OpenAI client paths
 - Compatibility translation from incoming Responses requests to chat-completions upstreams when the selected target does not support native Responses
 
 These paths are covered by automated tests in [internal/neurorouter/proxy_test.go](../internal/neurorouter/proxy_test.go).
@@ -17,6 +18,7 @@ These paths are covered by automated tests in [internal/neurorouter/proxy_test.g
 - Anthropic Messages clients that require `POST /v1/messages`
 - Generic OpenAI chat-completions clients that require inbound `POST /v1/chat/completions`
 - Tool-specific integrations that need custom headers, auth flows, or non-Responses wire protocols
+- Codex ChatGPT account-auth pass-through to OpenAI upstreams. The community proxy now returns an explicit compatibility error telling users to use an OpenAI API key instead of failing with an opaque upstream `401`.
 
 Those paths may exist in private development or future work, but they are not part of the verified public community surface today.
 

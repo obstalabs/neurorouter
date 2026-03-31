@@ -1,6 +1,7 @@
 package neurorouter
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestHandleResponses_NonStreaming(t *testing.T) {
@@ -135,6 +138,291 @@ func TestHandleResponses_CodexAliasPath(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Fatalf("upstream hits: got %d, want 1", hits)
+	}
+}
+
+func TestHandleModels_ReturnsCodexDiscoveryShape(t *testing.T) {
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4-mini": {BaseURL: "https://api.openai.com"},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4-mini": {
+				Model:          "gpt-5.4-mini",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	resp, err := http.Get("http://" + addr + "/models?client_version=0.98.0")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	var result struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Models []struct {
+			ID        string  `json:"id"`
+			Slug      string  `json:"slug"`
+			Display   string  `json:"display_name"`
+			Provider  string  `json:"provider"`
+			WireAPI   WireAPI `json:"wire_api"`
+			Streaming bool    `json:"streaming"`
+			Reasoning []struct {
+				Effort      string `json:"effort"`
+				Description string `json:"description"`
+			} `json:"supported_reasoning_levels"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if result.Object != "list" {
+		t.Fatalf("object: got %q, want list", result.Object)
+	}
+	if len(result.Data) != 1 || result.Data[0].ID != "gpt-5.4-mini" {
+		t.Fatalf("data: %+v", result.Data)
+	}
+	if len(result.Models) != 1 {
+		t.Fatalf("models len: got %d, want 1", len(result.Models))
+	}
+	if result.Models[0].ID != "gpt-5.4-mini" {
+		t.Fatalf("model id: got %q, want gpt-5.4-mini", result.Models[0].ID)
+	}
+	if result.Models[0].Slug != "gpt-5.4-mini" {
+		t.Fatalf("model slug: got %q, want gpt-5.4-mini", result.Models[0].Slug)
+	}
+	if result.Models[0].Display != "gpt-5.4-mini" {
+		t.Fatalf("model display name: got %q, want gpt-5.4-mini", result.Models[0].Display)
+	}
+	if result.Models[0].WireAPI != WireAPIResponses {
+		t.Fatalf("wire api: got %q, want %q", result.Models[0].WireAPI, WireAPIResponses)
+	}
+	if !result.Models[0].Streaming {
+		t.Fatal("expected model discovery to report streaming support")
+	}
+	if len(result.Models[0].Reasoning) == 0 {
+		t.Fatal("expected model discovery to expose supported reasoning levels")
+	}
+}
+
+func TestHandleResponses_DecodesZstdRequestBody(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-zstd","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}],"status":"completed"}]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4-mini": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4-mini": {
+				Model:          "gpt-5.4-mini",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := `{"model":"gpt-5.4-mini","stream":true,"input":[{"type":"message","role":"user","content":"hello"}],"metadata":{"session_id":"codex-zstd"}}`
+	req, err := http.NewRequest(http.MethodPost, localProxyURL(addr, "/responses"), bytes.NewReader(compressZstd(t, []byte(body))))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "zstd")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+	if captured["model"] != "gpt-5.4-mini" {
+		t.Fatalf("captured model: %+v", captured["model"])
+	}
+	if captured["metadata"].(map[string]any)["session_id"] != "codex-zstd" {
+		t.Fatalf("metadata lost: %+v", captured["metadata"])
+	}
+}
+
+func TestHandleResponses_ForwardsClientAuthContextHeaders(t *testing.T) {
+	var authHeader string
+	var accountHeader string
+	var originator string
+	var version string
+	var searchEligible string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		accountHeader = r.Header.Get("Chatgpt-Account-Id")
+		originator = r.Header.Get("Originator")
+		version = r.Header.Get("Version")
+		searchEligible = r.Header.Get("X-Oai-Web-Search-Eligible")
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-client-auth","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}],"status":"completed"}]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4-mini": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4-mini": {
+				Model:          "gpt-5.4-mini",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	req, err := http.NewRequest(http.MethodPost, localProxyURL(addr, "/responses"), strings.NewReader(`{"model":"gpt-5.4-mini","input":[{"type":"message","role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer oauth-token")
+	req.Header.Set("Chatgpt-Account-Id", "acct_123")
+	req.Header.Set("Originator", "Codex Desktop")
+	req.Header.Set("Version", "0.98.0")
+	req.Header.Set("X-Oai-Web-Search-Eligible", "true")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+	if authHeader != "Bearer oauth-token" {
+		t.Fatalf("authorization header: got %q, want bearer token", authHeader)
+	}
+	if accountHeader != "acct_123" {
+		t.Fatalf("account header: got %q, want acct_123", accountHeader)
+	}
+	if originator != "Codex Desktop" {
+		t.Fatalf("originator: got %q, want Codex Desktop", originator)
+	}
+	if version != "0.98.0" {
+		t.Fatalf("version: got %q, want 0.98.0", version)
+	}
+	if searchEligible != "true" {
+		t.Fatalf("search eligibility header: got %q, want true", searchEligible)
+	}
+}
+
+func TestHandleResponses_RewritesOAuthScopeFailureClearly(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"Missing scopes: api.responses.write","type":"invalid_request_error"}}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4-mini": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4-mini": {
+				Model:          "gpt-5.4-mini",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	req, err := http.NewRequest(http.MethodPost, localProxyURL(addr, "/responses"), strings.NewReader(`{"model":"gpt-5.4-mini","input":[{"type":"message","role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer oauth-token")
+	req.Header.Set("Chatgpt-Account-Id", "acct_123")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body), "supports Codex through an OpenAI API key today") {
+		t.Fatalf("expected clearer OAuth compatibility error, got %s", string(body))
 	}
 }
 
@@ -1659,4 +1947,21 @@ func TestPool_BackwardCompat(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: %d", resp.StatusCode)
 	}
+}
+
+func compressZstd(t *testing.T, body []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	writer, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatalf("new zstd writer: %v", err)
+	}
+	if _, err := writer.Write(body); err != nil {
+		t.Fatalf("write zstd body: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close zstd writer: %v", err)
+	}
+	return buf.Bytes()
 }

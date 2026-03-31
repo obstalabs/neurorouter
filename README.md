@@ -43,6 +43,8 @@ wire_api = "responses"
 
 That keeps Codex on the native Responses API path instead of relying on a generic base-URL override.
 
+For the community edition today, Codex is verified with an OpenAI API key. ChatGPT account-auth pass-through is detected and returned with an explicit compatibility error because the upstream rejects it without `api.responses.write`.
+
 ## What NeuroRouter is
 
 A drop-in local proxy that sits between your AI coding tool and the API. Every request passes through three stages:
@@ -55,7 +57,7 @@ Universal filters such as `oversized_blocks` and `stale_reads` apply across prov
 
 **Preserve semantics** — Codex/OpenAI clients can stay on the native Responses wire path when the selected upstream supports it. For simpler text-only requests against Chat Completions targets, NeuroRouter can still fall back to compatibility translation.
 
-Verified in the community edition for Responses-native clients such as Codex. See [docs/compatibility.md](docs/compatibility.md) for the current test-backed client-path matrix.
+Verified in the community edition for Responses-native clients such as Codex. See [docs/compatibility.md](docs/compatibility.md) for the current test-backed client-path matrix and current auth boundary.
 
 ## Licensing Model
 
