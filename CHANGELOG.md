@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.4] - 2026-04-01
+
+### Fixed
+- Current Codex default-provider flows now work end-to-end through NeuroRouter with `/models` compatibility, zstd request decoding, websocket `/responses`, and preserved turn continuity on the supported OpenAI API-key path
+
+### Changed
+- Added a versioned client compatibility matrix in `docs/compatibility.md` and linked it from the README so tested Codex/OpenAI paths and current auth limits are explicit
+
 ## [0.1.3] - 2026-03-31
 
 ### Fixed
