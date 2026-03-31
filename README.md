@@ -23,8 +23,8 @@ neurorouter
 # Point Claude Code at it
 ANTHROPIC_BASE_URL=http://localhost:4000 claude
 
-# Fallback for Codex / OpenAI tools that only support base URL override
-OPENAI_BASE_URL=http://localhost:4000 codex
+# Point current Codex at it
+codex -c 'openai_base_url="http://127.0.0.1:4000"'
 
 # See what would be filtered without sending
 neurorouter --dry-run
@@ -44,6 +44,8 @@ wire_api = "responses"
 That keeps Codex on the native Responses API path instead of relying on a generic base-URL override.
 
 For the community edition today, Codex is verified with an OpenAI API key. ChatGPT account-auth pass-through is detected and returned with an explicit compatibility error because the upstream rejects it without `api.responses.write`.
+
+The exact tested client/version combinations live in [docs/compatibility.md](docs/compatibility.md). If a client release changes `/models`, compression, websocket transport, or auth behavior, that matrix is the source of truth for what the community binary currently supports.
 
 ## What NeuroRouter is
 
