@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -768,6 +769,235 @@ func TestHandleResponsesWebsocket_NativeResponsesStreamingPassthrough(t *testing
 	}
 	if !strings.Contains(events[2], `"type":"response.completed"`) {
 		t.Fatalf("missing completed event: %s", events[2])
+	}
+}
+
+func TestHandleResponsesWebsocket_PreservesCodexTurnStateAcrossRequests(t *testing.T) {
+	type capturedRequest struct {
+		TurnState string
+		Body      map[string]any
+	}
+
+	var (
+		mu       sync.Mutex
+		captured []capturedRequest
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		mu.Lock()
+		idx := len(captured)
+		captured = append(captured, capturedRequest{
+			TurnState: r.Header.Get(codexTurnStateHeader),
+			Body:      body,
+		})
+		mu.Unlock()
+
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if idx == 0 {
+			w.Header().Set(codexTurnStateHeader, "turn-123")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-native-1\"}}\n\n")
+			flusher.Flush()
+			_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-native-1\"}}\n\n")
+			flusher.Flush()
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-native-2\"}}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-native-2\"}}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/responses", nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	first := map[string]any{
+		"type":                "response.create",
+		"model":               "gpt-5.4",
+		"instructions":        "",
+		"input":               []map[string]any{{"type": "message", "role": "user", "content": "hi"}},
+		"tools":               []any{},
+		"tool_choice":         "auto",
+		"parallel_tool_calls": true,
+		"stream":              true,
+		"store":               true,
+		"include":             []any{},
+	}
+	firstBytes, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal first request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, firstBytes); err != nil {
+		t.Fatalf("write first websocket request: %v", err)
+	}
+
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read first websocket message: %v", err)
+		}
+		if strings.Contains(string(message), `"type":"response.completed"`) {
+			break
+		}
+	}
+
+	second := map[string]any{
+		"type":                 "response.create",
+		"model":                "gpt-5.4",
+		"instructions":         "",
+		"input":                []map[string]any{{"type": "message", "role": "user", "content": "next"}},
+		"tools":                []any{},
+		"tool_choice":          "auto",
+		"parallel_tool_calls":  true,
+		"stream":               true,
+		"store":                true,
+		"include":              []any{},
+		"previous_response_id": "resp-native-1",
+	}
+	secondBytes, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("marshal second request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, secondBytes); err != nil {
+		t.Fatalf("write second websocket request: %v", err)
+	}
+
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read second websocket message: %v", err)
+		}
+		if strings.Contains(string(message), `"type":"response.completed"`) {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(captured) != 2 {
+		t.Fatalf("captured requests: got %d, want 2", len(captured))
+	}
+	if captured[0].TurnState != "" {
+		t.Fatalf("first turn state: got %q, want empty", captured[0].TurnState)
+	}
+	if captured[1].TurnState != "turn-123" {
+		t.Fatalf("second turn state: got %q, want %q", captured[1].TurnState, "turn-123")
+	}
+	if got := captured[1].Body["previous_response_id"]; got != "resp-native-1" {
+		t.Fatalf("second previous_response_id: got %#v, want %q", got, "resp-native-1")
+	}
+}
+
+func TestHandleResponses_PreservesCodexTurnStateHeader(t *testing.T) {
+	var capturedHeaders []string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeaders = append(capturedHeaders, r.Header.Get(codexTurnStateHeader))
+		w.Header().Set("Content-Type", "application/json")
+		if len(capturedHeaders) == 1 {
+			w.Header().Set(codexTurnStateHeader, "turn-http-123")
+		}
+		_, _ = w.Write([]byte(`{"id":"resp-http","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := `{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":"hi"}]}`
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/responses", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if got := resp.Header.Get(codexTurnStateHeader); got != "turn-http-123" {
+		t.Fatalf("first response turn state: got %q, want %q", got, "turn-http-123")
+	}
+
+	req, err = http.NewRequest(http.MethodPost, "http://"+addr+"/v1/responses", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new second request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(codexTurnStateHeader, "turn-http-123")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if len(capturedHeaders) != 2 {
+		t.Fatalf("captured headers: got %d, want 2", len(capturedHeaders))
+	}
+	if capturedHeaders[0] != "" {
+		t.Fatalf("first upstream turn state: got %q, want empty", capturedHeaders[0])
+	}
+	if capturedHeaders[1] != "turn-http-123" {
+		t.Fatalf("second upstream turn state: got %q, want %q", capturedHeaders[1], "turn-http-123")
 	}
 }
 

@@ -23,6 +23,8 @@ import (
 // DefaultListenAddress keeps the proxy on loopback by default.
 const DefaultListenAddress = "127.0.0.1:4000"
 
+const codexTurnStateHeader = "X-Codex-Turn-State"
+
 // Target describes an upstream API endpoint.
 type Target struct {
 	BaseURL string // e.g. "https://api.deepseek.com"
@@ -541,6 +543,7 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
+	forwardCodexTurnState(upReq.Header, r.Header)
 
 	if selection.Target.APIKey != "" {
 		upReq.Header.Set("Authorization", "Bearer "+selection.Target.APIKey)
@@ -570,6 +573,7 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	// pass through upstream errors
 	if upResp.StatusCode >= 400 {
+		propagateCodexTurnState(w.Header(), upResp.Header)
 		if runtime.dnd != nil {
 			runtime.dnd.RecordError()
 		}
@@ -596,6 +600,7 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if useResponsesWire {
+		propagateCodexTurnState(w.Header(), upResp.Header)
 		if req.Stream {
 			p.handlePassthroughStreamingResponse(w, upResp)
 		} else {
@@ -608,6 +613,18 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		p.handleStreamingResponse(w, upResp)
 	} else {
 		p.handleNonStreamingResponse(w, upResp)
+	}
+}
+
+func forwardCodexTurnState(dst, src http.Header) {
+	if turnState := src.Get(codexTurnStateHeader); turnState != "" {
+		dst.Set(codexTurnStateHeader, turnState)
+	}
+}
+
+func propagateCodexTurnState(dst, src http.Header) {
+	if turnState := src.Get(codexTurnStateHeader); turnState != "" {
+		dst.Set(codexTurnStateHeader, turnState)
 	}
 }
 

@@ -24,6 +24,10 @@ var responsesWebsocketUpgrader = websocket.Upgrader{
 	},
 }
 
+type responsesWebsocketBridgeState struct {
+	turnState string
+}
+
 func (p *Proxy) handleResponsesWebsocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -33,6 +37,9 @@ func (p *Proxy) handleResponsesWebsocket(w http.ResponseWriter, r *http.Request)
 	defer func() { _ = conn.Close() }()
 
 	conn.SetReadLimit(responsesWebsocketReadLimit)
+	state := &responsesWebsocketBridgeState{
+		turnState: r.Header.Get(codexTurnStateHeader),
+	}
 
 	for {
 		msgType, payload, err := conn.ReadMessage()
@@ -42,14 +49,14 @@ func (p *Proxy) handleResponsesWebsocket(w http.ResponseWriter, r *http.Request)
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
 		}
-		if err := p.handleResponsesWebsocketMessage(conn, r, payload); err != nil {
+		if err := p.handleResponsesWebsocketMessage(conn, r, state, payload); err != nil {
 			slog.Debug("proxy websocket request failed", "error", err)
 			return
 		}
 	}
 }
 
-func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Request, payload []byte) error {
+func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Request, state *responsesWebsocketBridgeState, payload []byte) error {
 	rawBody, err := sanitizeResponsesWebsocketRequest(payload)
 	if err != nil {
 		return writeResponsesWebsocketError(conn, http.StatusBadRequest, "invalid_request_error", "invalid websocket request: "+err.Error())
@@ -153,6 +160,9 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 	}
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("Accept", "text/event-stream")
+	if state != nil && state.turnState != "" {
+		upReq.Header.Set(codexTurnStateHeader, state.turnState)
+	}
 
 	if selection.Target.APIKey != "" {
 		upReq.Header.Set("Authorization", "Bearer "+selection.Target.APIKey)
@@ -170,6 +180,11 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 		return writeResponsesWebsocketError(conn, http.StatusBadGateway, "server_error", "upstream error: "+err.Error())
 	}
 	defer func() { _ = upResp.Body.Close() }()
+	if state != nil {
+		if turnState := upResp.Header.Get(codexTurnStateHeader); turnState != "" {
+			state.turnState = turnState
+		}
+	}
 
 	if upResp.StatusCode >= 500 {
 		p.health.RecordFailure(selection.Target.BaseURL)
