@@ -238,6 +238,10 @@ func TestHandleResponses_DecodesZstdRequestBody(t *testing.T) {
 	var captured map[string]any
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.Error(w, "upgrade required", http.StatusUpgradeRequired)
+			return
+		}
 		if r.URL.Path != "/v1/responses" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -583,6 +587,10 @@ func TestHandleResponses_NativeResponsesNonStreamingPassthrough(t *testing.T) {
 	var captured map[string]any
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.Error(w, "upgrade required", http.StatusUpgradeRequired)
+			return
+		}
 		if r.URL.Path != "/v1/responses" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -702,6 +710,10 @@ func TestHandleResponsesWebsocket_NativeResponsesStreamingPassthrough(t *testing
 	var captured map[string]any
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.Error(w, "upgrade required", http.StatusUpgradeRequired)
+			return
+		}
 		if r.URL.Path != "/v1/responses" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -802,6 +814,323 @@ func TestHandleResponsesWebsocket_NativeResponsesStreamingPassthrough(t *testing
 	}
 }
 
+func TestHandleResponsesWebsocket_UsesUpstreamWebsocketAcrossRequests(t *testing.T) {
+	type capturedRequest struct {
+		Body    map[string]any
+		Session string
+		Request string
+		Beta    string
+	}
+
+	var (
+		mu             sync.Mutex
+		handshakeCount int
+		captured       []capturedRequest
+	)
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "websocket required", http.StatusMethodNotAllowed)
+			return
+		}
+
+		mu.Lock()
+		handshakeCount++
+		mu.Unlock()
+		headers := http.Header{}
+		headers.Set(codexTurnStateHeader, "turn-ws-123")
+		conn, err := upgrader.Upgrade(w, r, headers)
+		if err != nil {
+			t.Fatalf("upgrade upstream websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+
+			var body map[string]any
+			if err := json.Unmarshal(message, &body); err != nil {
+				t.Fatalf("decode websocket request: %v", err)
+			}
+
+			mu.Lock()
+			idx := len(captured)
+			captured = append(captured, capturedRequest{
+				Body:    body,
+				Session: r.Header.Get("session_id"),
+				Request: r.Header.Get("X-Client-Request-Id"),
+				Beta:    r.Header.Get("OpenAI-Beta"),
+			})
+			mu.Unlock()
+
+			var completed string
+			if idx == 0 {
+				completed = "resp-native-1"
+			} else {
+				completed = "resp-native-2"
+			}
+
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.created","response":{"id":"%s"}}`, completed))); err != nil {
+				t.Fatalf("write created event: %v", err)
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"%s"}}`, completed))); err != nil {
+				t.Fatalf("write completed event: %v", err)
+			}
+		}
+	})
+	upstream := httptest.NewServer(mux)
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL, APIKey: "proxy-key"},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	headers := http.Header{}
+	headers.Set("session_id", "sess-ws")
+	headers.Set("X-Client-Request-Id", "req-ws")
+	headers.Set("OpenAI-Beta", openAIResponsesWebsocketBetaHeaderValue)
+	conn, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/responses", headers)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	first := map[string]any{
+		"type":         "response.create",
+		"model":        "gpt-5.4",
+		"instructions": "",
+		"input":        []map[string]any{{"type": "message", "role": "user", "content": "hi"}},
+		"stream":       true,
+		"store":        true,
+		"client_metadata": map[string]string{
+			codexTurnMetadataHeader: `{"turn_id":"turn-1"}`,
+		},
+	}
+	firstBytes, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal first request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, firstBytes); err != nil {
+		t.Fatalf("write first websocket request: %v", err)
+	}
+	readResponsesWebsocketUntilCompleted(t, conn)
+
+	second := map[string]any{
+		"type":                 "response.create",
+		"model":                "gpt-5.4",
+		"instructions":         "",
+		"input":                []map[string]any{{"type": "message", "role": "user", "content": "next"}},
+		"stream":               true,
+		"store":                true,
+		"previous_response_id": "resp-native-1",
+		"client_metadata": map[string]string{
+			codexTurnMetadataHeader: `{"turn_id":"turn-2"}`,
+		},
+	}
+	secondBytes, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("marshal second request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, secondBytes); err != nil {
+		t.Fatalf("write second websocket request: %v", err)
+	}
+	readResponsesWebsocketUntilCompleted(t, conn)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if handshakeCount != 1 {
+		t.Fatalf("upstream websocket handshakes: got %d, want 1", handshakeCount)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("captured requests: got %d, want 2", len(captured))
+	}
+	if captured[0].Body["type"] != "response.create" {
+		t.Fatalf("first request type: got %#v, want response.create", captured[0].Body["type"])
+	}
+	if _, ok := captured[0].Body["client_metadata"]; !ok {
+		t.Fatalf("first request missing client_metadata: %+v", captured[0].Body)
+	}
+	if got := captured[1].Body["previous_response_id"]; got != "resp-native-1" {
+		t.Fatalf("second previous_response_id: got %#v, want %q", got, "resp-native-1")
+	}
+	if captured[0].Session != "sess-ws" || captured[0].Request != "req-ws" {
+		t.Fatalf("upstream handshake headers: got session=%q request=%q", captured[0].Session, captured[0].Request)
+	}
+	if captured[0].Beta != openAIResponsesWebsocketBetaHeaderValue {
+		t.Fatalf("upstream beta header: got %q, want %q", captured[0].Beta, openAIResponsesWebsocketBetaHeaderValue)
+	}
+}
+
+func TestHandleResponsesWebsocket_ReusesUpstreamWebsocketAcrossClientReconnects(t *testing.T) {
+	var (
+		mu             sync.Mutex
+		handshakeCount int
+		captured       []map[string]any
+	)
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "websocket required", http.StatusMethodNotAllowed)
+			return
+		}
+
+		mu.Lock()
+		handshakeCount++
+		mu.Unlock()
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade upstream websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+
+			var body map[string]any
+			if err := json.Unmarshal(message, &body); err != nil {
+				t.Fatalf("decode websocket request: %v", err)
+			}
+
+			mu.Lock()
+			idx := len(captured)
+			captured = append(captured, body)
+			mu.Unlock()
+
+			responseID := "resp-native-1"
+			if idx > 0 {
+				responseID = "resp-native-2"
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.created","response":{"id":"%s"}}`, responseID))); err != nil {
+				t.Fatalf("write created event: %v", err)
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"%s"}}`, responseID))); err != nil {
+				t.Fatalf("write completed event: %v", err)
+			}
+		}
+	})
+	upstream := httptest.NewServer(mux)
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL, APIKey: "proxy-key"},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	headers := http.Header{}
+	headers.Set("session_id", "sess-reconnect")
+	headers.Set("X-Client-Request-Id", "sess-reconnect")
+	headers.Set("OpenAI-Beta", openAIResponsesWebsocketBetaHeaderValue)
+
+	firstConn, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/responses", headers)
+	if err != nil {
+		t.Fatalf("dial first websocket: %v", err)
+	}
+	first := map[string]any{
+		"type":         "response.create",
+		"model":        "gpt-5.4",
+		"instructions": "",
+		"input":        []map[string]any{{"type": "message", "role": "user", "content": "hi"}},
+		"stream":       true,
+		"store":        true,
+	}
+	firstBytes, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal first request: %v", err)
+	}
+	if err := firstConn.WriteMessage(websocket.TextMessage, firstBytes); err != nil {
+		t.Fatalf("write first websocket request: %v", err)
+	}
+	readResponsesWebsocketUntilCompleted(t, firstConn)
+	_ = firstConn.Close()
+
+	secondConn, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/responses", headers)
+	if err != nil {
+		t.Fatalf("dial second websocket: %v", err)
+	}
+	defer func() { _ = secondConn.Close() }()
+
+	second := map[string]any{
+		"type":                 "response.create",
+		"model":                "gpt-5.4",
+		"instructions":         "",
+		"input":                []map[string]any{{"type": "message", "role": "user", "content": "next"}},
+		"stream":               true,
+		"store":                true,
+		"previous_response_id": "resp-native-1",
+	}
+	secondBytes, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("marshal second request: %v", err)
+	}
+	if err := secondConn.WriteMessage(websocket.TextMessage, secondBytes); err != nil {
+		t.Fatalf("write second websocket request: %v", err)
+	}
+	readResponsesWebsocketUntilCompleted(t, secondConn)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if handshakeCount != 1 {
+		t.Fatalf("upstream websocket handshakes: got %d, want 1", handshakeCount)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("captured requests: got %d, want 2", len(captured))
+	}
+	if got := captured[1]["previous_response_id"]; got != "resp-native-1" {
+		t.Fatalf("second previous_response_id: got %#v, want %q", got, "resp-native-1")
+	}
+}
+
 func TestHandleResponsesWebsocket_PreservesCodexTurnStateAcrossRequests(t *testing.T) {
 	type capturedRequest struct {
 		TurnState string
@@ -814,6 +1143,10 @@ func TestHandleResponsesWebsocket_PreservesCodexTurnStateAcrossRequests(t *testi
 	)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.Error(w, "upgrade required", http.StatusUpgradeRequired)
+			return
+		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -1107,12 +1440,33 @@ func TestHandleResponses_ForwardsCompatibilityHeadersWithProxyAuth(t *testing.T)
 	}
 }
 
+func readResponsesWebsocketUntilCompleted(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read websocket message: %v", err)
+		}
+		if strings.Contains(string(message), `"type":"response.completed"`) {
+			return
+		}
+		if strings.Contains(string(message), `"type":"error"`) {
+			t.Fatalf("unexpected websocket error: %s", string(message))
+		}
+	}
+}
+
 func TestHandleResponsesWebsocket_ForwardsClientMetadataAsHeaders(t *testing.T) {
 	var turnMetadata string
 	var traceparent string
 	var tracestate string
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.Error(w, "upgrade required", http.StatusUpgradeRequired)
+			return
+		}
 		turnMetadata = r.Header.Get(codexTurnMetadataHeader)
 		traceparent = r.Header.Get("Traceparent")
 		tracestate = r.Header.Get("Tracestate")

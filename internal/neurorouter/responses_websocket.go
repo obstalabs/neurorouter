@@ -9,12 +9,18 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 )
 
 const responsesWebsocketReadLimit = 8 << 20
+const openAIResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
+
+var responsesWebsocketConnectionSeq uint64
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
 	ReadBufferSize:  32 * 1024,
@@ -25,7 +31,102 @@ var responsesWebsocketUpgrader = websocket.Upgrader{
 }
 
 type responsesWebsocketBridgeState struct {
-	turnState string
+	mu              sync.Mutex
+	sessionKey      string
+	turnState       string
+	upstream        *websocket.Conn
+	upstreamBaseURL string
+}
+
+func (s *responsesWebsocketBridgeState) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resetUpstreamLocked()
+}
+
+func (s *responsesWebsocketBridgeState) resetUpstreamLocked() {
+	if s.upstream != nil {
+		_ = s.upstream.Close()
+	}
+	s.upstream = nil
+	s.upstreamBaseURL = ""
+}
+
+type responsesWebsocketRegistry struct {
+	mu     sync.Mutex
+	states map[string]*responsesWebsocketBridgeState
+}
+
+func newResponsesWebsocketRegistry() *responsesWebsocketRegistry {
+	return &responsesWebsocketRegistry{
+		states: make(map[string]*responsesWebsocketBridgeState),
+	}
+}
+
+func (r *responsesWebsocketRegistry) state(key, initialTurnState string) *responsesWebsocketBridgeState {
+	sessionKey := normalizeSessionKey(key)
+	if sessionKey == "" {
+		sessionKey = defaultSessionKey
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	state, ok := r.states[sessionKey]
+	if !ok {
+		state = &responsesWebsocketBridgeState{sessionKey: sessionKey}
+		r.states[sessionKey] = state
+	}
+	state.mu.Lock()
+	if state.turnState == "" && initialTurnState != "" {
+		state.turnState = initialTurnState
+	}
+	state.mu.Unlock()
+	return state
+}
+
+func (r *responsesWebsocketRegistry) release(key string) {
+	sessionKey := normalizeSessionKey(key)
+	if sessionKey == "" {
+		return
+	}
+
+	r.mu.Lock()
+	state, ok := r.states[sessionKey]
+	if ok {
+		delete(r.states, sessionKey)
+	}
+	r.mu.Unlock()
+
+	if ok {
+		state.close()
+	}
+}
+
+func (r *responsesWebsocketRegistry) closeAll() {
+	r.mu.Lock()
+	states := make([]*responsesWebsocketBridgeState, 0, len(r.states))
+	for key, state := range r.states {
+		delete(r.states, key)
+		states = append(states, state)
+	}
+	r.mu.Unlock()
+
+	for _, state := range states {
+		state.close()
+	}
+}
+
+func nextResponsesWebsocketConnectionKey() string {
+	return fmt.Sprintf("ws-%d", atomic.AddUint64(&responsesWebsocketConnectionSeq, 1))
+}
+
+func responsesWebsocketSessionKey(r *http.Request, rawBody []byte, connectionKey string) string {
+	sessionKey := requestSessionKey(r, rawBody)
+	if sessionKey == "" || sessionKey == defaultSessionKey {
+		return connectionKey
+	}
+	return sessionKey
 }
 
 func (p *Proxy) handleResponsesWebsocket(w http.ResponseWriter, r *http.Request) {
@@ -34,12 +135,11 @@ func (p *Proxy) handleResponsesWebsocket(w http.ResponseWriter, r *http.Request)
 		slog.Debug("proxy websocket upgrade failed", "error", err)
 		return
 	}
+	connectionKey := nextResponsesWebsocketConnectionKey()
+	defer p.wsBridge.release(connectionKey)
 	defer func() { _ = conn.Close() }()
 
 	conn.SetReadLimit(responsesWebsocketReadLimit)
-	state := &responsesWebsocketBridgeState{
-		turnState: r.Header.Get(codexTurnStateHeader),
-	}
 
 	for {
 		msgType, payload, err := conn.ReadMessage()
@@ -49,14 +149,14 @@ func (p *Proxy) handleResponsesWebsocket(w http.ResponseWriter, r *http.Request)
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
 		}
-		if err := p.handleResponsesWebsocketMessage(conn, r, state, payload); err != nil {
+		if err := p.handleResponsesWebsocketMessage(conn, r, connectionKey, payload); err != nil {
 			slog.Debug("proxy websocket request failed", "error", err)
 			return
 		}
 	}
 }
 
-func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Request, state *responsesWebsocketBridgeState, payload []byte) error {
+func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Request, connectionKey string, payload []byte) error {
 	rawBody, extraHeaders, err := sanitizeResponsesWebsocketRequest(payload)
 	if err != nil {
 		return writeResponsesWebsocketError(conn, http.StatusBadRequest, "invalid_request_error", "invalid websocket request: "+err.Error())
@@ -66,7 +166,9 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 		return writeResponsesWebsocketError(conn, http.StatusBadRequest, "invalid_request_error", "websocket mode is not supported in dry-run")
 	}
 
-	runtime := p.runtimeForSession(requestSessionKey(r, rawBody))
+	sessionKey := responsesWebsocketSessionKey(r, rawBody, connectionKey)
+	state := p.wsBridge.state(sessionKey, r.Header.Get(codexTurnStateHeader))
+	runtime := p.runtimeForSession(sessionKey)
 
 	var req ResponsesRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
@@ -145,12 +247,26 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 		return writeResponsesWebsocketError(conn, http.StatusBadRequest, "invalid_request_error", "websocket mode requires a Responses-compatible upstream")
 	}
 
+	websocketBody := payload
 	body := rawBody
 	if pipeResult != nil {
 		body, err = RewriteResponsesRequest(rawBody, originalMsgs, filteredMsgs)
 		if err != nil {
 			return writeResponsesWebsocketError(conn, http.StatusInternalServerError, "server_error", "rewrite responses request: "+err.Error())
 		}
+		websocketBody, err = RewriteResponsesRequest(payload, originalMsgs, filteredMsgs)
+		if err != nil {
+			return writeResponsesWebsocketError(conn, http.StatusInternalServerError, "server_error", "rewrite websocket request: "+err.Error())
+		}
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if err := p.relayResponsesWebsocketUpstream(conn, r, state, selection, websocketBody); err == nil {
+		return nil
+	} else if !errors.Is(err, errResponsesWebsocketFallback) {
+		return writeResponsesWebsocketError(conn, http.StatusBadGateway, "server_error", "upstream websocket error: "+err.Error())
 	}
 
 	upstreamURL := strings.TrimRight(selection.Target.BaseURL, "/") + "/v1/responses"
@@ -273,6 +389,132 @@ func extractResponsesWebsocketCompatibilityHeaders(raw json.RawMessage) (http.He
 	}
 
 	return headers, nil
+}
+
+var errResponsesWebsocketFallback = errors.New("fallback to http responses bridge")
+
+func (p *Proxy) relayResponsesWebsocketUpstream(clientConn *websocket.Conn, r *http.Request, state *responsesWebsocketBridgeState, selection targetSelection, payload []byte) error {
+	upstreamConn, err := p.ensureResponsesWebsocketUpstream(r, state, selection)
+	if err != nil {
+		return errResponsesWebsocketFallback
+	}
+
+	if err := upstreamConn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		state.resetUpstreamLocked()
+		return err
+	}
+
+	for {
+		msgType, message, err := upstreamConn.ReadMessage()
+		if err != nil {
+			state.resetUpstreamLocked()
+			return err
+		}
+		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+			continue
+		}
+		if err := clientConn.WriteMessage(msgType, message); err != nil {
+			return err
+		}
+
+		eventType := responsesWebsocketEventType(message)
+		if eventType == "response.completed" || eventType == "error" {
+			return nil
+		}
+	}
+}
+
+func (p *Proxy) ensureResponsesWebsocketUpstream(r *http.Request, state *responsesWebsocketBridgeState, selection targetSelection) (*websocket.Conn, error) {
+	if state.upstream != nil && state.upstreamBaseURL == selection.Target.BaseURL {
+		return state.upstream, nil
+	}
+	if state.upstream != nil {
+		state.resetUpstreamLocked()
+	}
+
+	upstreamURL, err := responsesWebsocketURL(selection.Target.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	headers := make(http.Header)
+	forwardOpenAICompatibilityHeaders(headers, r.Header)
+	if state.sessionKey != "" {
+		if headers.Get("session_id") == "" {
+			headers.Set("session_id", state.sessionKey)
+		}
+		if headers.Get("X-Client-Request-Id") == "" {
+			headers.Set("X-Client-Request-Id", state.sessionKey)
+		}
+	}
+	if selection.Capabilities.Provider == "openai" && !responsesWebsocketBetaHeaderPresent(headers) {
+		headers.Add("OpenAI-Beta", openAIResponsesWebsocketBetaHeaderValue)
+	}
+	if state.turnState != "" {
+		headers.Set(codexTurnStateHeader, state.turnState)
+	}
+	if selection.Target.APIKey != "" {
+		headers.Set("Authorization", "Bearer "+selection.Target.APIKey)
+	} else if auth := r.Header.Get("Authorization"); auth != "" {
+		headers.Set("Authorization", auth)
+		forwardClientAuthHeaders(headers, r.Header)
+	}
+
+	dialer := *websocket.DefaultDialer
+	dialer.EnableCompression = true
+	upstreamConn, resp, err := dialer.Dial(upstreamURL, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil {
+		if turnState := resp.Header.Get(codexTurnStateHeader); turnState != "" {
+			state.turnState = turnState
+		}
+	}
+
+	state.upstream = upstreamConn
+	state.upstreamBaseURL = selection.Target.BaseURL
+	return upstreamConn, nil
+}
+
+func responsesWebsocketURL(baseURL string) (string, error) {
+	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
+	if err != nil {
+		return "", err
+	}
+
+	switch u.Scheme {
+	case "https":
+		u.Scheme = "wss"
+	case "http":
+		u.Scheme = "ws"
+	default:
+		return "", fmt.Errorf("unsupported upstream scheme %q", u.Scheme)
+	}
+
+	u.Path = strings.TrimRight(u.Path, "/") + "/v1/responses"
+	return u.String(), nil
+}
+
+func responsesWebsocketEventType(payload []byte) string {
+	var event struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return ""
+	}
+	return event.Type
+}
+
+func responsesWebsocketBetaHeaderPresent(headers http.Header) bool {
+	for _, value := range headers.Values("OpenAI-Beta") {
+		for _, part := range strings.Split(value, ",") {
+			if strings.TrimSpace(part) == openAIResponsesWebsocketBetaHeaderValue {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func relayResponsesSSEToWebsocket(conn *websocket.Conn, body io.Reader) error {

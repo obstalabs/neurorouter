@@ -79,6 +79,7 @@ type Proxy struct {
 	audit    *auditLog               // default session runtime (kept for test helpers)
 	dnd      *DND                    // default session runtime (kept for test helpers)
 	sessions *sessionRegistry        // session-scoped runtime state
+	wsBridge *responsesWebsocketRegistry
 }
 
 type targetSelection struct {
@@ -102,6 +103,7 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 		pipeline: defaultRuntime.pipeline,
 		audit:    defaultRuntime.audit,
 		dnd:      defaultRuntime.dnd,
+		wsBridge: newResponsesWebsocketRegistry(),
 	}
 
 	// Initialize rate limiters for pool targets.
@@ -197,11 +199,18 @@ func (p *Proxy) Stop() error {
 	srv := p.srv
 	p.mu.Unlock()
 	if srv == nil {
+		if p.wsBridge != nil {
+			p.wsBridge.closeAll()
+		}
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return srv.Shutdown(ctx)
+	err := srv.Shutdown(ctx)
+	if p.wsBridge != nil {
+		p.wsBridge.closeAll()
+	}
+	return err
 }
 
 // Addr returns the listening address after Start.
