@@ -20,7 +20,10 @@ Or download from [releases](https://github.com/ppiankov/neurorouter/releases/lat
 # Start the proxy
 neurorouter
 
-# Fallback for Codex or another Responses-native tool that only supports base URL override
+# Point Claude Code at it
+ANTHROPIC_BASE_URL=http://localhost:4000 claude
+
+# Fallback for Codex / OpenAI tools that only support base URL override
 OPENAI_BASE_URL=http://localhost:4000 codex
 
 # See what would be filtered without sending
