@@ -33,10 +33,36 @@ jobs:
         with:
           go-version: '1.25'
 
+      - name: Compute GoReleaser args
+        id: goreleaser_args
+        shell: bash
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          args="release --clean"
+          skips=()
+
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            skips+=("homebrew")
+          fi
+
+          if [ -z "$SCOOP_BUCKET_TOKEN" ]; then
+            skips+=("scoop")
+          fi
+
+          if [ ${#skips[@]} -gt 0 ]; then
+            skip_arg=$(IFS=,; echo "${skips[*]}")
+            args="$args --skip=$skip_arg"
+          fi
+
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
-          args: release --clean
+          args: ${{ steps.goreleaser_args.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
