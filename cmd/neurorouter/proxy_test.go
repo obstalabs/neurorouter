@@ -183,6 +183,54 @@ func TestConfigDerivedSettingsDriveRunningProxy(t *testing.T) {
 	}
 }
 
+func TestStartupAuthMode(t *testing.T) {
+	t.Run("pass through when proxy has no key", func(t *testing.T) {
+		got := startupAuthMode("", "", "")
+		want := "forward client Authorization header (API key or OAuth token)"
+		if got != want {
+			t.Fatalf("auth mode: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("reports env configured key", func(t *testing.T) {
+		got := startupAuthMode("env:OPENAI_API_KEY", "sk-test", "")
+		want := "configured on proxy from OPENAI_API_KEY"
+		if got != want {
+			t.Fatalf("auth mode: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("reports auto detected provider key", func(t *testing.T) {
+		got := startupAuthMode("", "sk-test", "OpenAI")
+		want := "configured on proxy (auto-detected from OpenAI credentials)"
+		if got != want {
+			t.Fatalf("auth mode: got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestStartupClientHint(t *testing.T) {
+	t.Run("responses hint for openai", func(t *testing.T) {
+		got := startupClientHint("127.0.0.1:4010", "https://api.openai.com", "OpenAI")
+		if !strings.Contains(got, "Codex or another Responses-compatible client") {
+			t.Fatalf("missing responses hint: %q", got)
+		}
+		if !strings.Contains(got, "OPENAI_BASE_URL=http://127.0.0.1:4010") {
+			t.Fatalf("missing OPENAI_BASE_URL hint: %q", got)
+		}
+	})
+
+	t.Run("claude hint for anthropic", func(t *testing.T) {
+		got := startupClientHint("127.0.0.1:4010", "https://api.anthropic.com", "Anthropic")
+		if !strings.Contains(got, "To use with Claude Code") {
+			t.Fatalf("missing Claude hint: %q", got)
+		}
+		if !strings.Contains(got, "ANTHROPIC_BASE_URL=http://127.0.0.1:4010") {
+			t.Fatalf("missing ANTHROPIC_BASE_URL hint: %q", got)
+		}
+	})
+}
+
 func newProxyTestCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "proxy"}
 	addProxyFlags(cmd)

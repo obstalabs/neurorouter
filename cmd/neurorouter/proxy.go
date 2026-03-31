@@ -210,6 +210,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(os.Stderr, "  protect: %v (policy: %s)\n", !noProtect, protectPolicy)
 	fmt.Fprintf(os.Stderr, "  filter:  %v\n", !noFilter)
 	fmt.Fprintf(os.Stderr, "  cache:   %v\n", !noCache)
+	fmt.Fprintf(os.Stderr, "  auth:    %s\n", startupAuthMode(settings.APIKey, apiKey, detectedProvider))
 	if publicBind {
 		fmt.Fprintf(os.Stderr, "  public:  true\n")
 		if exposeManagement {
@@ -221,11 +222,9 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(os.Stderr, "  public:  false (loopback only)\n")
 	}
 	if dryRun {
-	fmt.Fprintf(os.Stderr, "  dry-run: enabled (requests will NOT be forwarded)\n")
+		fmt.Fprintf(os.Stderr, "  dry-run: enabled (requests will NOT be forwarded)\n")
 	}
-	fmt.Fprintf(os.Stderr, "\nTo use with a Responses-compatible client:\n")
-	fmt.Fprintf(os.Stderr, "  export OPENAI_BASE_URL=http://%s\n", addr)
-	fmt.Fprintf(os.Stderr, "  # for Codex, prefer a provider profile with wire_api=responses\n\n")
+	fmt.Fprint(os.Stderr, startupClientHint(addr, target, detectedProvider))
 	fmt.Fprintf(os.Stderr, "Waiting for requests...\n")
 
 	sig := make(chan os.Signal, 1)
@@ -253,6 +252,48 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+func startupAuthMode(rawAPIKeySetting, resolvedAPIKey, detectedProvider string) string {
+	if resolvedAPIKey == "" {
+		return "forward client Authorization header (API key or OAuth token)"
+	}
+
+	if strings.HasPrefix(rawAPIKeySetting, "env:") {
+		return fmt.Sprintf("configured on proxy from %s", strings.TrimPrefix(rawAPIKeySetting, "env:"))
+	}
+
+	if rawAPIKeySetting != "" {
+		return "configured on proxy via flag or config"
+	}
+
+	if detectedProvider != "" {
+		return fmt.Sprintf("configured on proxy (auto-detected from %s credentials)", detectedProvider)
+	}
+
+	return "configured on proxy"
+}
+
+func startupClientHint(addr, target, detectedProvider string) string {
+	family := startupClientFamily(target, detectedProvider)
+
+	switch family {
+	case "anthropic":
+		return fmt.Sprintf("\nTo use with Claude Code:\n  export ANTHROPIC_BASE_URL=http://%s\n\n", addr)
+	default:
+		return fmt.Sprintf("\nTo use with Codex or another Responses-compatible client:\n  export OPENAI_BASE_URL=http://%s\n  # for Codex, prefer a provider profile with wire_api=responses\n\n", addr)
+	}
+}
+
+func startupClientFamily(target, detectedProvider string) string {
+	lowerTarget := strings.ToLower(target)
+	lowerProvider := strings.ToLower(detectedProvider)
+
+	if strings.Contains(lowerProvider, "anthropic") || strings.Contains(lowerTarget, "anthropic") {
+		return "anthropic"
+	}
+
+	return "responses"
 }
 
 func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRuntimeSettings, error) {
