@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.3] - 2026-03-31
+
+### Fixed
+- Explicit upstream targets no longer borrow credentials from a different provider during startup auto-detection
+- Proxy startup now shows exported auth env keys and supports an explicit `--client-auth` mode for pass-through Authorization
+
 ## [0.1.2] - 2026-03-31
 
 ### Changed
