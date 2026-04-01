@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6] - 2026-04-01
+
+### Fixed
+- Native Responses cleanup now strips stale structured Codex/OpenAI tool items, including repeated read/output pairs and orphaned structured outputs, so large duplicated request bodies are removed before they hit the upstream
+
+### Changed
+- Added replay and proxy coverage that proves Codex-style native Responses cleanup can remove more than 100KB of waste while preserving valid tool continuity
+
 ## [0.1.5] - 2026-04-01
 
 ### Changed
