@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.20] - 2026-04-01
+
+### Fixed
+- Added native `POST /responses/compact` and `POST /v1/responses/compact` support so Codex `0.118.0` compaction requests no longer fail with a local `404`
+
+### Changed
+- Updated the compatibility matrix to record verified Codex `0.118.0` support on the OpenAI API-key path, including the compact endpoint requirement
+
 ## [0.1.19] - 2026-04-01
 
 ### Fixed
