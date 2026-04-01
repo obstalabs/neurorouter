@@ -139,6 +139,8 @@ func (p *Proxy) Start() (string, error) {
 	mux.HandleFunc("GET /responses", p.handleResponsesWebsocket)
 	mux.HandleFunc("POST /v1/responses", p.handleResponses)
 	mux.HandleFunc("POST /responses", p.handleResponses)
+	mux.HandleFunc("POST /v1/responses/compact", p.handleResponsesCompact)
+	mux.HandleFunc("POST /responses/compact", p.handleResponsesCompact)
 	mux.HandleFunc("/health", p.handleHealth)
 	if !publicBind || p.cfg.ExposeManagement {
 		mux.HandleFunc("/v1/suggestions", p.handleSuggestions)
@@ -394,6 +396,14 @@ func (p *Proxy) filteredSuggestions(runtime *sessionRuntime) []Suggestion {
 }
 
 func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
+	p.handleResponsesForUpstream(w, r, "/v1/responses", false)
+}
+
+func (p *Proxy) handleResponsesCompact(w http.ResponseWriter, r *http.Request) {
+	p.handleResponsesForUpstream(w, r, "/v1/responses/compact", true)
+}
+
+func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Request, nativeUpstreamPath string, requireNativeResponses bool) {
 	rawBody, err := readDecodedRequestBody(r)
 	if err != nil {
 		var decodeErr *requestBodyError
@@ -534,12 +544,16 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body := rawBody
-	upstreamPath := "/v1/responses"
+	upstreamPath := nativeUpstreamPath
 	if useResponsesWire {
 		if responsesRewrite != nil {
 			body = responsesRewrite.Body
 		}
 	} else {
+		if requireNativeResponses {
+			writeError(w, http.StatusBadRequest, "responses compact requires native Responses upstream support")
+			return
+		}
 		chatReq, err := BuildChatRequest(&req, filteredMsgs)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "translate request: "+err.Error())
