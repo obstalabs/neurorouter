@@ -987,6 +987,64 @@ func TestHandleResponsesWebsocket_UsesUpstreamWebsocketAcrossRequests(t *testing
 	}
 }
 
+func TestSanitizeResponsesWebsocketRequest_PreservesContinuityFields(t *testing.T) {
+	payload := []byte(`{
+		"type":"response.create",
+		"model":"gpt-5.4",
+		"input":[{"type":"message","role":"user","content":"next"}],
+		"tools":[{"type":"function","name":"Read"}],
+		"tool_choice":"auto",
+		"parallel_tool_calls":true,
+		"store":true,
+		"stream":true,
+		"previous_response_id":"resp-prev-123",
+		"client_metadata":{
+			"x-codex-turn-metadata":"{\"turn_id\":\"turn-123\"}",
+			"ws_request_header_traceparent":"00-abc-123-01",
+			"ws_request_header_tracestate":"vendor=value"
+		},
+		"generate":false
+	}`)
+
+	body, headers, err := sanitizeResponsesWebsocketRequest(payload)
+	if err != nil {
+		t.Fatalf("sanitize request: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("decode sanitized body: %v", err)
+	}
+
+	if _, ok := doc["type"]; ok {
+		t.Fatalf("type should be stripped from sanitized body: %+v", doc)
+	}
+	if _, ok := doc["client_metadata"]; ok {
+		t.Fatalf("client_metadata should be stripped from sanitized body: %+v", doc)
+	}
+	if _, ok := doc["generate"]; ok {
+		t.Fatalf("generate should be stripped from sanitized body: %+v", doc)
+	}
+	if got := doc["previous_response_id"]; got != "resp-prev-123" {
+		t.Fatalf("previous_response_id should be preserved, got %#v", got)
+	}
+	if got := doc["tool_choice"]; got != "auto" {
+		t.Fatalf("tool_choice should be preserved, got %#v", got)
+	}
+	if got := doc["store"]; got != true {
+		t.Fatalf("store should be preserved, got %#v", got)
+	}
+	if got := headers.Get(codexTurnMetadataHeader); got != `{"turn_id":"turn-123"}` {
+		t.Fatalf("turn metadata header: got %q", got)
+	}
+	if got := headers.Get("Traceparent"); got != "00-abc-123-01" {
+		t.Fatalf("traceparent header: got %q", got)
+	}
+	if got := headers.Get("Tracestate"); got != "vendor=value" {
+		t.Fatalf("tracestate header: got %q", got)
+	}
+}
+
 func TestHandleResponsesWebsocket_ReusesUpstreamWebsocketAcrossClientReconnects(t *testing.T) {
 	var (
 		mu             sync.Mutex

@@ -364,6 +364,9 @@ func sanitizeResponsesWebsocketRequest(payload []byte) ([]byte, http.Header, err
 		return nil, nil, err
 	}
 
+	// Strip only websocket envelope metadata that must become headers. Continuity
+	// fields such as previous_response_id and the actual input history must remain
+	// in the upstream JSON body or Codex turn state can break across requests.
 	delete(doc, "type")
 	delete(doc, "client_metadata")
 	delete(doc, "generate")
