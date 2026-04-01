@@ -19,22 +19,24 @@ type replayFixture struct {
 }
 
 type replayFilterConfig struct {
-	StaleReads      bool `json:"stale_reads"`
-	Thinking        bool `json:"thinking"`
-	OrphanedResults bool `json:"orphaned_results"`
-	FailedRetries   bool `json:"failed_retries"`
-	SystemReminders bool `json:"system_reminders"`
-	OversizedBlocks bool `json:"oversized_blocks"`
+	StaleReads              bool `json:"stale_reads"`
+	Thinking                bool `json:"thinking"`
+	OrphanedResults         bool `json:"orphaned_results"`
+	FailedRetries           bool `json:"failed_retries"`
+	SystemReminders         bool `json:"system_reminders"`
+	OversizedBlocks         bool `json:"oversized_blocks"`
+	StructuredShellMaxBytes int  `json:"structured_shell_max_bytes"`
 }
 
 func (c replayFilterConfig) filterConfig() FilterConfig {
 	return FilterConfig{
-		StaleReads:      c.StaleReads,
-		Thinking:        c.Thinking,
-		OrphanedResults: c.OrphanedResults,
-		FailedRetries:   c.FailedRetries,
-		SystemReminders: c.SystemReminders,
-		OversizedBlocks: c.OversizedBlocks,
+		StaleReads:              c.StaleReads,
+		Thinking:                c.Thinking,
+		OrphanedResults:         c.OrphanedResults,
+		FailedRetries:           c.FailedRetries,
+		SystemReminders:         c.SystemReminders,
+		OversizedBlocks:         c.OversizedBlocks,
+		StructuredShellMaxBytes: c.StructuredShellMaxBytes,
 	}
 }
 

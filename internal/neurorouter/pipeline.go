@@ -120,5 +120,6 @@ func hasEnabledFilters(cfg FilterConfig) bool {
 		cfg.OrphanedResults ||
 		cfg.FailedRetries ||
 		cfg.SystemReminders ||
-		cfg.OversizedBlocks
+		cfg.OversizedBlocks ||
+		cfg.StructuredShellMaxBytes > 0
 }

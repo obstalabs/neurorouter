@@ -30,6 +30,9 @@ func TestProxyFlagDefaults(t *testing.T) {
 	if got := cmd.Flags().Lookup("client-auth").DefValue; got != "false" {
 		t.Fatalf("client-auth default: got %q, want false", got)
 	}
+	if got := cmd.Flags().Lookup("shell-max-output-bytes").DefValue; got != "0" {
+		t.Fatalf("shell-max-output-bytes default: got %q, want 0", got)
+	}
 }
 
 func TestResolveProxySettings_Defaults(t *testing.T) {
@@ -45,6 +48,9 @@ func TestResolveProxySettings_Defaults(t *testing.T) {
 	}
 	if settings.Target != "" {
 		t.Fatalf("target: got %q, want empty", settings.Target)
+	}
+	if settings.ShellMaxBytes != 0 {
+		t.Fatalf("shell max bytes: got %d, want 0", settings.ShellMaxBytes)
 	}
 }
 
@@ -114,6 +120,7 @@ func TestResolveProxySettings_FlagsOverrideLoadedConfig(t *testing.T) {
 	mustSetFlag(t, cmd, "listen", "localhost:7000")
 	mustSetFlag(t, cmd, "target", "https://flag.example")
 	mustSetFlag(t, cmd, "protect-policy", "warn")
+	mustSetFlag(t, cmd, "shell-max-output-bytes", "32768")
 
 	settings, err := resolveProxySettings(cmd, cfg)
 	if err != nil {
@@ -127,6 +134,9 @@ func TestResolveProxySettings_FlagsOverrideLoadedConfig(t *testing.T) {
 	}
 	if settings.ProtectPolicy != "warn" {
 		t.Fatalf("protect policy: got %q", settings.ProtectPolicy)
+	}
+	if settings.ShellMaxBytes != 32768 {
+		t.Fatalf("shell max bytes: got %d, want 32768", settings.ShellMaxBytes)
 	}
 }
 

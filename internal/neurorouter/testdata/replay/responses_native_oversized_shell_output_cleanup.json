@@ -1,0 +1,79 @@
+{
+  "name": "responses_native_oversized_shell_output_cleanup",
+  "description": "Truncate an oversized native shell output when the explicit shell cap is enabled.",
+  "capabilities": {
+    "provider": "openai",
+    "wire_api": "responses",
+    "streaming": true,
+    "responses_items": true,
+    "reasoning_items": true
+  },
+  "filters": {
+    "structured_shell_max_bytes": 96
+  },
+  "request": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "local_shell_call",
+        "call_id": "shell_call_1",
+        "status": "completed",
+        "action": {
+          "type": "exec",
+          "command": [
+            "go",
+            "test",
+            "./..."
+          ],
+          "working_directory": "/repo"
+        }
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "shell_call_1",
+        "output": "build log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nbuild log line\nfatal: no such file or directory\nexit status 1\n",
+        "status": "completed",
+        "exit_code": 1
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Continue."
+      }
+    ]
+  },
+  "expected_filters_run": [
+    "oversized_blocks"
+  ],
+  "expected_body": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "local_shell_call",
+        "call_id": "shell_call_1",
+        "status": "completed",
+        "action": {
+          "type": "exec",
+          "command": [
+            "go",
+            "test",
+            "./..."
+          ],
+          "working_directory": "/repo"
+        }
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "shell_call_1",
+        "output": "build log line\nbu\n[truncated by neurorouter — original 0KB]\nh file or directory\nexit status 1\n",
+        "status": "completed",
+        "exit_code": 1
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Continue."
+      }
+    ]
+  }
+}

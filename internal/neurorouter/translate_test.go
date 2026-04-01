@@ -2,6 +2,7 @@ package neurorouter
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -746,6 +747,102 @@ func TestRewriteResponsesRequestWithConfig_KeepsUnresolvedFailedShellRetries(t *
 	input := rewritten["input"].([]any)
 	if len(input) != 5 {
 		t.Fatalf("input length: got %d, want 5", len(input))
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_TruncatesOversizedShellOutputs(t *testing.T) {
+	largeOutput := strings.Repeat("build log line\n", 32) + "fatal: no such file or directory\nexit status 1\n"
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"local_shell_call","call_id":"shell_call_1","status":"completed","action":{"type":"exec","command":["go","test","./..."],"working_directory":"/repo"}},
+			{"type":"shell_call_output","call_id":"shell_call_1","output":` + strconv.Quote(largeOutput) + `,"status":"completed","exit_code":1},
+			{"type":"message","role":"user","content":"Continue."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "local_shell_call"},
+			{Type: "shell_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		StructuredShellMaxBytes: 96,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input length: got %d, want 3", len(input))
+	}
+	output := input[1].(map[string]any)["output"].(string)
+	wantOutput := truncateStructuredShellOutput(largeOutput, 96)
+	if output != wantOutput {
+		t.Fatalf("unexpected truncated output:\n got: %q\nwant: %q", output, wantOutput)
+	}
+	if !strings.Contains(output, "[truncated by neurorouter") {
+		t.Fatalf("missing truncation marker: %q", output)
+	}
+	if !strings.Contains(output, "exit status 1\n") {
+		t.Fatalf("tail context should remain: %q", output)
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_KeepsShellOutputsWhenCapDisabled(t *testing.T) {
+	largeOutput := strings.Repeat("build log line\n", 32) + "fatal: no such file or directory\nexit status 1\n"
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"local_shell_call","call_id":"shell_call_1","status":"completed","action":{"type":"exec","command":["go","test","./..."],"working_directory":"/repo"}},
+			{"type":"shell_call_output","call_id":"shell_call_1","output":` + strconv.Quote(largeOutput) + `,"status":"completed","exit_code":1},
+			{"type":"message","role":"user","content":"Continue."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "local_shell_call"},
+			{Type: "shell_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if len(result.FiltersRun) != 0 {
+		t.Fatalf("expected no truncation by default, got %v", result.FiltersRun)
+	}
+	if result.BytesBefore != result.BytesAfter {
+		t.Fatalf("expected no rewrite size change, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
 	}
 }
 

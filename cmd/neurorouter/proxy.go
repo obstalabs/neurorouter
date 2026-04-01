@@ -45,6 +45,7 @@ type proxyRuntimeSettings struct {
 	Listen           string
 	Target           string
 	APIKey           string
+	ShellMaxBytes    int
 	ClientAuth       bool
 	ProtectPolicy    string
 	PublicBind       bool
@@ -67,6 +68,7 @@ func addProxyFlags(cmd *cobra.Command) {
 	f.String("protect-policy", "warn", "secret policy: block, redact, warn")
 	f.Bool("no-protect", false, "disable secret detection")
 	f.Bool("no-filter", false, "disable content filters")
+	f.Int("shell-max-output-bytes", 0, "truncate native shell outputs above this many bytes (0 disables)")
 	f.Bool("no-cache", false, "disable neurocache pattern detection")
 	f.Bool("dry-run", false, "show filtered vs original without sending upstream")
 	f.Bool("debug", false, "enable debug logging")
@@ -99,6 +101,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	exposeManagement := settings.ExposeManagement
 	target := settings.Target
 	apiKey := settings.APIKey
+	shellMaxBytes := settings.ShellMaxBytes
 	clientAuth := settings.ClientAuth
 	protectPolicy := settings.ProtectPolicy
 	noProtect := settings.NoProtect
@@ -144,6 +147,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		cfg.Filters = neurorouter.FilterConfig{
 			StaleReads: true, Thinking: true, OrphanedResults: true,
 			FailedRetries: true, SystemReminders: true, OversizedBlocks: true,
+			StructuredShellMaxBytes: shellMaxBytes,
 		}
 	}
 
@@ -437,6 +441,7 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 		Target:           cfg.Upstream,
 		ProtectPolicy:    cfg.ProtectPolicy,
 		APIKey:           flagString(cmd, "api-key"),
+		ShellMaxBytes:    flagInt(cmd, "shell-max-output-bytes"),
 		ClientAuth:       flagBool(cmd, "client-auth"),
 		PublicBind:       flagBool(cmd, "public"),
 		ExposeManagement: flagBool(cmd, "expose-management"),
@@ -487,5 +492,10 @@ func flagString(cmd *cobra.Command, name string) string {
 
 func flagBool(cmd *cobra.Command, name string) bool {
 	val, _ := cmd.Flags().GetBool(name)
+	return val
+}
+
+func flagInt(cmd *cobra.Command, name string) int {
+	val, _ := cmd.Flags().GetInt(name)
 	return val
 }

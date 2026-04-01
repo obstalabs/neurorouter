@@ -30,13 +30,14 @@ type FilterResult struct {
 
 // FilterConfig controls which filters are enabled.
 type FilterConfig struct {
-	StaleReads      bool
-	Thinking        bool
-	OrphanedResults bool
-	FailedRetries   bool
-	SystemReminders bool
-	OversizedBlocks bool
-	MaxBlockBytes   int // 0 = default 100KB
+	StaleReads              bool
+	Thinking                bool
+	OrphanedResults         bool
+	FailedRetries           bool
+	SystemReminders         bool
+	OversizedBlocks         bool
+	MaxBlockBytes           int // 0 = default 100KB
+	StructuredShellMaxBytes int // 0 = disabled for native shell outputs
 }
 
 const defaultMaxBlockBytes = 100 * 1024

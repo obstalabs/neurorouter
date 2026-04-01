@@ -8,6 +8,11 @@ import (
 
 const instructionMessageSource = "instructions"
 
+const (
+	structuredShellOutputHeadShare  = 1
+	structuredShellOutputShareTotal = 3
+)
+
 // codexCompactionSummaryPrefix mirrors Codex's SUMMARY_PREFIX template so we can
 // identify exact compaction-summary messages without fuzzy heuristics.
 const codexCompactionSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
@@ -378,6 +383,17 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 		changed = changed || orphanChanged
 		if changed {
 			filters = append(filters, "orphaned_results")
+		}
+	}
+
+	if cfg.StructuredShellMaxBytes > 0 {
+		next, changed, err := truncateStructuredOversizedShellOutputItems(out, cfg.StructuredShellMaxBytes)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		if changed {
+			filters = append(filters, "oversized_blocks")
 		}
 	}
 
@@ -762,6 +778,53 @@ func dropStructuredSupersededOutputItems(items []json.RawMessage) ([]json.RawMes
 	return filterRawResponsesItems(items, drop), true, nil
 }
 
+func truncateStructuredOversizedShellOutputItems(items []json.RawMessage, threshold int) ([]json.RawMessage, bool, error) {
+	out := append([]json.RawMessage(nil), items...)
+	changed := false
+
+	for i, rawItem := range items {
+		rewritten, itemChanged, err := truncateStructuredOversizedShellOutputItem(rawItem, threshold)
+		if err != nil {
+			return nil, false, fmt.Errorf("truncate structured item %d: %w", i, err)
+		}
+		if !itemChanged {
+			continue
+		}
+		out[i] = rewritten
+		changed = true
+	}
+
+	if !changed {
+		return items, false, nil
+	}
+	return out, true, nil
+}
+
+func truncateStructuredOversizedShellOutputItem(rawItem json.RawMessage, threshold int) (json.RawMessage, bool, error) {
+	item, err := decodeRawResponsesItem(rawItem)
+	if err != nil {
+		return nil, false, err
+	}
+
+	switch rawItemType(item) {
+	case "shell_call_output", "local_shell_call_output":
+	default:
+		return rawItem, false, nil
+	}
+
+	output, err := rawJSONStringValue(item["output"])
+	if err != nil || output == "" || len(output) <= threshold {
+		return rawItem, false, nil
+	}
+
+	item["output"] = marshalRawJSONString(truncateStructuredShellOutput(output, threshold))
+	out, err := json.Marshal(item)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
 func dropStructuredDuplicateCompactionSummaries(items []json.RawMessage) ([]json.RawMessage, bool, error) {
 	summaries := make(map[string][]int)
 
@@ -920,6 +983,28 @@ func structuredShellOutputOutcome(item map[string]json.RawMessage) (bool, bool, 
 	default:
 		return false, false, nil
 	}
+}
+
+func truncateStructuredShellOutput(output string, threshold int) string {
+	if threshold <= 0 || len(output) <= threshold {
+		return output
+	}
+
+	marker := "\n[truncated by neurorouter — original " + formatBytes(len(output)) + "]\n"
+	available := threshold - len(marker)
+	if available <= 0 {
+		return marker
+	}
+
+	headBytes := available * structuredShellOutputHeadShare / structuredShellOutputShareTotal
+	tailBytes := available - headBytes
+	if headBytes == 0 {
+		return marker + output[len(output)-tailBytes:]
+	}
+	if tailBytes == 0 {
+		return output[:headBytes] + marker
+	}
+	return output[:headBytes] + marker + output[len(output)-tailBytes:]
 }
 
 func canonicalizeRawJSON(raw json.RawMessage) (string, error) {
