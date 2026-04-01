@@ -2,6 +2,7 @@ package neurorouter
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -103,9 +104,18 @@ func messageBytes(msgs []ChatMessage) int {
 // FilterOversizedBlocks truncates messages with Content exceeding threshold.
 func FilterOversizedBlocks(threshold int) Filter {
 	return func(msgs []ChatMessage) []ChatMessage {
+		shellTools := claudeShellToolUses(msgs)
 		out := make([]ChatMessage, len(msgs))
 		for i, m := range msgs {
 			if len(m.Content) > threshold {
+				if shaped, changed := shapeClaudeShellToolResultMessage(m.Content, threshold, shellTools); changed {
+					out[i] = ChatMessage{
+						Role:    m.Role,
+						Content: shaped,
+						Source:  m.Source,
+					}
+					continue
+				}
 				out[i] = ChatMessage{
 					Role:    m.Role,
 					Content: m.Content[:threshold] + "\n[truncated by neurorouter — original " + formatBytes(len(m.Content)) + "]",
@@ -117,6 +127,250 @@ func FilterOversizedBlocks(threshold int) Filter {
 		}
 		return out
 	}
+}
+
+type claudeShellTextField struct {
+	name string
+	text string
+}
+
+func claudeShellToolUses(msgs []ChatMessage) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+
+		var blocks []map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(m.Content), &blocks); err != nil {
+			continue
+		}
+		for _, block := range blocks {
+			blockType, err := rawJSONStringValue(block["type"])
+			if err != nil || blockType != "tool_use" {
+				continue
+			}
+			name, err := rawJSONStringValue(block["name"])
+			if err != nil || !isClaudeShellToolName(name) {
+				continue
+			}
+			id, err := rawJSONStringValue(block["id"])
+			if err != nil || id == "" {
+				continue
+			}
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func isClaudeShellToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "bash", "powershell":
+		return true
+	default:
+		return false
+	}
+}
+
+func shapeClaudeShellToolResultMessage(content string, threshold int, shellTools map[string]struct{}) (string, bool) {
+	if len(shellTools) == 0 {
+		return "", false
+	}
+
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &blocks); err != nil {
+		return "", false
+	}
+
+	changed := false
+	for _, block := range blocks {
+		blockType, err := rawJSONStringValue(block["type"])
+		if err != nil || blockType != "tool_result" {
+			continue
+		}
+		toolUseID, err := rawJSONStringValue(block["tool_use_id"])
+		if err != nil {
+			continue
+		}
+		if _, ok := shellTools[toolUseID]; !ok {
+			continue
+		}
+
+		blockChanged, err := shapeClaudeToolResultBlock(block, threshold)
+		if err != nil {
+			continue
+		}
+		changed = changed || blockChanged
+	}
+
+	if !changed {
+		return "", false
+	}
+
+	rewritten, err := json.Marshal(blocks)
+	if err != nil || len(rewritten) >= len(content) {
+		return "", false
+	}
+	return string(rewritten), true
+}
+
+func shapeClaudeToolResultBlock(block map[string]json.RawMessage, threshold int) (bool, error) {
+	rawContent, ok := block["content"]
+	if !ok || len(rawContent) == 0 {
+		return false, nil
+	}
+
+	var textValue string
+	if err := json.Unmarshal(rawContent, &textValue); err == nil {
+		shaped, changed := shapeClaudeShellJSONText(textValue, threshold)
+		if !changed {
+			return false, nil
+		}
+		block["content"] = marshalRawJSONString(shaped)
+		return true, nil
+	}
+
+	var parts []map[string]json.RawMessage
+	if err := json.Unmarshal(rawContent, &parts); err != nil {
+		return false, nil
+	}
+
+	changed := false
+	for _, part := range parts {
+		partType, err := rawJSONStringValue(part["type"])
+		if err != nil {
+			continue
+		}
+		switch partType {
+		case "text":
+			text, err := rawJSONStringValue(part["text"])
+			if err != nil || text == "" {
+				continue
+			}
+			shaped, partChanged := shapeClaudeShellJSONText(text, threshold)
+			if !partChanged {
+				continue
+			}
+			part["text"] = marshalRawJSONString(shaped)
+			changed = true
+		case "json":
+			rawValue, ok := part["value"]
+			if !ok || len(rawValue) == 0 {
+				continue
+			}
+			var value map[string]json.RawMessage
+			if err := json.Unmarshal(rawValue, &value); err != nil {
+				continue
+			}
+			partChanged, err := shapeClaudeShellJSONFields(value, threshold)
+			if err != nil || !partChanged {
+				continue
+			}
+			part["value"] = marshalRawValue(value)
+			changed = true
+		}
+	}
+
+	if !changed {
+		return false, nil
+	}
+	block["content"] = marshalRawValue(parts)
+	return true, nil
+}
+
+func shapeClaudeShellJSONText(text string, threshold int) (string, bool) {
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &value); err != nil {
+		return "", false
+	}
+	changed, err := shapeClaudeShellJSONFields(value, threshold)
+	if err != nil || !changed {
+		return "", false
+	}
+	rewritten, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	return string(rewritten), true
+}
+
+func shapeClaudeShellJSONFields(obj map[string]json.RawMessage, threshold int) (bool, error) {
+	var fields []claudeShellTextField
+	for _, name := range []string{"stderr", "stdout"} {
+		text, err := rawJSONStringValue(obj[name])
+		if err != nil || text == "" {
+			continue
+		}
+		fields = append(fields, claudeShellTextField{name: name, text: text})
+	}
+
+	if len(fields) == 0 {
+		return false, nil
+	}
+
+	total := 0
+	for _, field := range fields {
+		total += len(field.text)
+	}
+	if total <= threshold {
+		return false, nil
+	}
+
+	budgets := claudeShellFieldBudgets(fields, threshold)
+	changed := false
+	for _, field := range fields {
+		budget := budgets[field.name]
+		if budget <= 0 || len(field.text) <= budget {
+			continue
+		}
+		obj[field.name] = marshalRawJSONString(truncateStructuredShellOutput(field.text, budget))
+		changed = true
+	}
+	return changed, nil
+}
+
+func claudeShellFieldBudgets(fields []claudeShellTextField, threshold int) map[string]int {
+	budgets := make(map[string]int, len(fields))
+	if len(fields) == 0 {
+		return budgets
+	}
+	if len(fields) == 1 {
+		budgets[fields[0].name] = threshold
+		return budgets
+	}
+
+	remaining := threshold
+	remainingFields := len(fields)
+	for _, field := range fields {
+		fairShare := remaining / remainingFields
+		if field.name == "stderr" && fairShare < threshold/2 {
+			fairShare = threshold / 2
+		}
+		if fairShare > remaining {
+			fairShare = remaining
+		}
+		if fairShare > len(field.text) {
+			fairShare = len(field.text)
+		}
+		budgets[field.name] = fairShare
+		remaining -= fairShare
+		remainingFields--
+	}
+
+	if remaining > 0 {
+		for _, preferred := range []string{"stdout", "stderr"} {
+			for _, field := range fields {
+				if field.name != preferred {
+					continue
+				}
+				budgets[field.name] += remaining
+				return budgets
+			}
+		}
+	}
+
+	return budgets
 }
 
 func formatBytes(n int) string {

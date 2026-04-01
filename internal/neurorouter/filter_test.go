@@ -1,6 +1,7 @@
 package neurorouter
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,141 @@ func TestFilterOversizedBlocks(t *testing.T) {
 		}
 		if !strings.Contains(out[1].Content, "[truncated") {
 			t.Error("user message not truncated")
+		}
+	})
+
+	t.Run("shapes claude bash tool_result json text", func(t *testing.T) {
+		semanticFilter := FilterOversizedBlocks(160)
+		resultJSON, err := json.Marshal(map[string]any{
+			"stdout":                   strings.Repeat("a", 220),
+			"stderr":                   "warning\n" + strings.Repeat("b", 120) + "\nexit status 7",
+			"returnCodeInterpretation": "exit_code:7",
+			"interrupted":              false,
+		})
+		if err != nil {
+			t.Fatalf("marshal shell result: %v", err)
+		}
+		userContent, err := json.Marshal([]map[string]any{
+			{
+				"type":        "tool_result",
+				"tool_use_id": "toolu_1",
+				"content": []map[string]any{
+					{"type": "text", "text": string(resultJSON)},
+				},
+				"is_error": true,
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal user content: %v", err)
+		}
+
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"printf x"}}]`},
+			{Role: "user", Content: string(userContent)},
+		}
+
+		out := semanticFilter(msgs)
+		if len(out) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(out))
+		}
+		if !strings.Contains(out[1].Content, `"tool_use_id":"toolu_1"`) {
+			t.Fatalf("tool result identity lost: %s", out[1].Content)
+		}
+
+		var blocks []map[string]any
+		if err := json.Unmarshal([]byte(out[1].Content), &blocks); err != nil {
+			t.Fatalf("decode shaped content: %v", err)
+		}
+		contentBlocks := blocks[0]["content"].([]any)
+		text := contentBlocks[0].(map[string]any)["text"].(string)
+
+		var shaped map[string]any
+		if err := json.Unmarshal([]byte(text), &shaped); err != nil {
+			t.Fatalf("decode shaped shell json: %v", err)
+		}
+		if !strings.Contains(shaped["stdout"].(string), "[truncated by neurorouter") {
+			t.Fatalf("stdout was not shaped: %q", shaped["stdout"])
+		}
+		if !strings.Contains(shaped["stderr"].(string), "exit status 7") {
+			t.Fatalf("stderr tail lost: %q", shaped["stderr"])
+		}
+		if shaped["returnCodeInterpretation"] != "exit_code:7" {
+			t.Fatalf("returnCodeInterpretation lost: %#v", shaped)
+		}
+	})
+
+	t.Run("shapes claude powershell tool_result json block", func(t *testing.T) {
+		semanticFilter := FilterOversizedBlocks(160)
+		userContent, err := json.Marshal([]map[string]any{
+			{
+				"type":        "tool_result",
+				"tool_use_id": "toolu_2",
+				"content": []map[string]any{
+					{
+						"type": "json",
+						"value": map[string]any{
+							"stdout":                   strings.Repeat("x", 220),
+							"stderr":                   "",
+							"returnCodeInterpretation": "exit_code:0",
+							"backgroundedByUser":       true,
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal user content: %v", err)
+		}
+
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_2","name":"PowerShell","input":{"command":"Write-Output hello"}}]`},
+			{Role: "user", Content: string(userContent)},
+		}
+
+		out := semanticFilter(msgs)
+		var blocks []map[string]any
+		if err := json.Unmarshal([]byte(out[1].Content), &blocks); err != nil {
+			t.Fatalf("decode shaped content: %v", err)
+		}
+		contentBlocks := blocks[0]["content"].([]any)
+		value := contentBlocks[0].(map[string]any)["value"].(map[string]any)
+		if !strings.Contains(value["stdout"].(string), "[truncated by neurorouter") {
+			t.Fatalf("stdout was not shaped: %q", value["stdout"])
+		}
+		if value["backgroundedByUser"] != true {
+			t.Fatalf("metadata lost: %#v", value)
+		}
+		if value["returnCodeInterpretation"] != "exit_code:0" {
+			t.Fatalf("returnCodeInterpretation lost: %#v", value)
+		}
+	})
+
+	t.Run("falls back safely for malformed shell json", func(t *testing.T) {
+		semanticFilter := FilterOversizedBlocks(160)
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_3","name":"bash","input":{"command":"printf x"}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_3","content":[{"type":"text","text":"not json at all"}]}]`},
+		}
+
+		out := semanticFilter(msgs)
+		if len(out) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(out))
+		}
+		if out[1].Content == "" {
+			t.Fatal("expected malformed shell result to remain")
+		}
+	})
+
+	t.Run("leaves non-shell tool_result untouched until generic truncation", func(t *testing.T) {
+		large := strings.Repeat("z", 220)
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_4","name":"Read","input":{"file_path":"/tmp/x"}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_4","content":"` + large + `"}]`},
+		}
+
+		out := f(msgs)
+		if !strings.Contains(out[1].Content, "[truncated by neurorouter") {
+			t.Fatalf("expected generic truncation fallback, got %s", out[1].Content)
 		}
 	})
 }
