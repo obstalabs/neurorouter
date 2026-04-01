@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.21] - 2026-04-01
+
+### Fixed
+- Native Responses cleanup now trims large read-style `function_call_output` and `custom_tool_call_output` transcripts under `oversized_blocks`, so Codex file-read and code-inspection transcripts no longer pass through untouched when they dominate request size
+
 ## [0.1.20] - 2026-04-01
 
 ### Fixed
