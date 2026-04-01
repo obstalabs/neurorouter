@@ -104,17 +104,15 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 	if err := json.Unmarshal(rawBody, &doc); err != nil {
 		return nil, fmt.Errorf("decode responses request: %w", err)
 	}
-	originalCanonical, err := json.Marshal(doc)
-	if err != nil {
-		return nil, fmt.Errorf("marshal original responses request: %w", err)
-	}
 
 	originalSources := make(map[string]struct{}, len(originalMsgs))
+	originalBySource := make(map[string]ChatMessage, len(originalMsgs))
 	for _, msg := range originalMsgs {
 		if msg.Source == "" {
 			continue
 		}
 		originalSources[msg.Source] = struct{}{}
+		originalBySource[msg.Source] = msg
 	}
 
 	processedBySource := make(map[string]ChatMessage, len(processedMsgs))
@@ -125,23 +123,35 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 		processedBySource[msg.Source] = msg
 	}
 
+	changed := false
 	if _, ok := originalSources[instructionMessageSource]; ok {
 		if msg, ok := processedBySource[instructionMessageSource]; ok && msg.Content != "" {
+			if msg.Content != originalBySource[instructionMessageSource].Content {
+				changed = true
+			}
 			doc["instructions"] = marshalRawJSONString(msg.Content)
 		} else {
+			changed = true
 			delete(doc, "instructions")
 		}
 	}
 
 	rawInput, ok := doc["input"]
 	if !ok {
+		if !changed {
+			return &ResponsesRewriteResult{
+				Body:        append([]byte(nil), rawBody...),
+				BytesBefore: len(rawBody),
+				BytesAfter:  len(rawBody),
+			}, nil
+		}
 		body, err := json.Marshal(doc)
 		if err != nil {
 			return nil, fmt.Errorf("marshal responses request without input: %w", err)
 		}
 		return &ResponsesRewriteResult{
 			Body:        body,
-			BytesBefore: len(originalCanonical),
+			BytesBefore: len(rawBody),
 			BytesAfter:  len(body),
 		}, nil
 	}
@@ -159,15 +169,23 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 			continue
 		}
 
+		original := originalBySource[source]
+		if msg, ok := processedBySource[source]; ok {
+			if msg.Content == original.Content {
+				updated = append(updated, rawItem)
+				continue
+			}
+		}
+
 		newText := ""
 		if msg, ok := processedBySource[source]; ok {
 			newText = msg.Content
 		}
-
 		rewritten, keep, err := rewriteRawMessageItem(rawItem, newText)
 		if err != nil {
 			return nil, fmt.Errorf("rewrite input item %d: %w", i, err)
 		}
+		changed = true
 		if keep {
 			updated = append(updated, rewritten)
 		}
@@ -178,6 +196,17 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 		return nil, err
 	}
 	updated = structuredFilters.Items
+	if len(structuredFilters.FiltersRun) > 0 {
+		changed = true
+	}
+
+	if !changed {
+		return &ResponsesRewriteResult{
+			Body:        append([]byte(nil), rawBody...),
+			BytesBefore: len(rawBody),
+			BytesAfter:  len(rawBody),
+		}, nil
+	}
 
 	inputBytes, err := json.Marshal(updated)
 	if err != nil {
@@ -191,7 +220,7 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 	}
 	return &ResponsesRewriteResult{
 		Body:        body,
-		BytesBefore: len(originalCanonical),
+		BytesBefore: len(rawBody),
 		BytesAfter:  len(body),
 		FiltersRun:  structuredFilters.FiltersRun,
 	}, nil

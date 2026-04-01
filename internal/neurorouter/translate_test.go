@@ -471,6 +471,38 @@ func TestRewriteResponsesRequestWithConfig_KeepsDistinctCompactionSummaries(t *t
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_PreservesRawBodyWhenUnchanged(t *testing.T) {
+	rawBody := []byte("{\n  \"model\":\"gpt-5.4\",\n  \"input\":[{\"role\":\"user\",\"type\":\"message\",\"content\":\"hello\"},{\"type\":\"shell_call_output\",\"call_id\":\"call_123\",\"output\":\"stdout\",\"status\":\"completed\"}]\n}")
+
+	req := &ResponsesRequest{
+		Model: "gpt-5.4",
+		Input: []InputItem{
+			{Type: "message", Role: "user", Content: json.RawMessage(`"hello"`)},
+			{Type: "shell_call_output"},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if result.BytesBefore != len(rawBody) || result.BytesAfter != len(rawBody) {
+		t.Fatalf("expected raw byte counts to be preserved, got before=%d after=%d want=%d", result.BytesBefore, result.BytesAfter, len(rawBody))
+	}
+	if string(result.Body) != string(rawBody) {
+		t.Fatalf("expected unchanged raw body to be preserved, got %q", string(result.Body))
+	}
+	if got := strings.Join(result.FiltersRun, ","); got != "" {
+		t.Fatalf("filters run: got %q, want none", got)
+	}
+}
+
 func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleSearchChains(t *testing.T) {
 	rawBody := []byte(`{
 		"model":"gpt-5.4",
