@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.8] - 2026-04-01
+
+### Fixed
+- Claude `tool_result` cleanup now parses structured bash and PowerShell JSON payloads so oversized shell transcripts are slimmed semantically while preserving decisive metadata like exit interpretation and background state
+
 ## [0.1.7] - 2026-04-01
 
 ### Fixed
