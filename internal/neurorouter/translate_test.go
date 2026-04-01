@@ -337,6 +337,139 @@ func TestRewriteResponsesRequestWithConfig_DropsSupersededStructuredOutputsForSa
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_DropsDuplicateCompactionSummaries(t *testing.T) {
+	summaryA := codexCompactionSummaryPrefix + "\nSummary A"
+	summaryB := codexCompactionSummaryPrefix + "\nSummary B"
+	summaryARaw, err := json.Marshal([]map[string]any{{"type": "input_text", "text": summaryA}})
+	if err != nil {
+		t.Fatalf("marshal summary A content: %v", err)
+	}
+	summaryBRaw, err := json.Marshal([]map[string]any{{"type": "input_text", "text": summaryB}})
+	if err != nil {
+		t.Fatalf("marshal summary B content: %v", err)
+	}
+	rawBody, err := json.Marshal(map[string]any{
+		"model": "gpt-5.4",
+		"input": []map[string]any{
+			{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": summaryA}}},
+			{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": summaryA}}},
+			{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": summaryB}}},
+			{"type": "message", "role": "user", "content": "continue"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "message", Role: "user", Content: summaryARaw},
+			{Type: "message", Role: "user", Content: summaryARaw},
+			{Type: "message", Role: "user", Content: summaryBRaw},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"continue"`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		SystemReminders: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "system_reminders"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input length: got %d, want 3", len(input))
+	}
+	gotSummaryA := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]
+	if gotSummaryA != summaryA {
+		t.Fatalf("expected latest duplicate summary to remain, got %+v", input[0])
+	}
+	gotSummaryB := input[1].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]
+	if gotSummaryB != summaryB {
+		t.Fatalf("expected distinct summary to remain, got %+v", input[1])
+	}
+	if input[2].(map[string]any)["content"] != "continue" {
+		t.Fatalf("expected user message to remain, got %+v", input[2])
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_KeepsDistinctCompactionSummaries(t *testing.T) {
+	summaryA := codexCompactionSummaryPrefix + "\nSummary A"
+	summaryB := codexCompactionSummaryPrefix + "\nSummary B"
+	summaryARaw, err := json.Marshal([]map[string]any{{"type": "input_text", "text": summaryA}})
+	if err != nil {
+		t.Fatalf("marshal summary A content: %v", err)
+	}
+	summaryBRaw, err := json.Marshal([]map[string]any{{"type": "input_text", "text": summaryB}})
+	if err != nil {
+		t.Fatalf("marshal summary B content: %v", err)
+	}
+	rawBody, err := json.Marshal(map[string]any{
+		"model": "gpt-5.4",
+		"input": []map[string]any{
+			{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": summaryA}}},
+			{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": summaryB}}},
+			{"type": "message", "role": "user", "content": "continue"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "message", Role: "user", Content: summaryARaw},
+			{Type: "message", Role: "user", Content: summaryBRaw},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"continue"`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		SystemReminders: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got := strings.Join(result.FiltersRun, ","); got != "" {
+		t.Fatalf("filters run: got %q, want none", got)
+	}
+	if result.BytesBefore != result.BytesAfter {
+		t.Fatalf("expected no rewrite size change, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input length: got %d, want 3", len(input))
+	}
+}
+
 func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleSearchChains(t *testing.T) {
 	rawBody := []byte(`{
 		"model":"gpt-5.4",

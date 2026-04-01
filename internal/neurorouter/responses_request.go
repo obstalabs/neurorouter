@@ -8,6 +8,10 @@ import (
 
 const instructionMessageSource = "instructions"
 
+// codexCompactionSummaryPrefix mirrors Codex's SUMMARY_PREFIX template so we can
+// identify exact compaction-summary messages without fuzzy heuristics.
+const codexCompactionSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
+
 type ResponsesRewriteResult struct {
 	Body        []byte
 	BytesBefore int
@@ -307,6 +311,17 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 	out := append([]json.RawMessage(nil), items...)
 	var filters []string
 
+	if cfg.SystemReminders {
+		next, changed, err := dropStructuredDuplicateCompactionSummaries(out)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		if changed {
+			filters = append(filters, "system_reminders")
+		}
+	}
+
 	if cfg.StaleReads {
 		var changed bool
 		next, readChanged, err := dropStructuredStaleReadItems(out)
@@ -563,6 +578,49 @@ func dropStructuredSupersededOutputItems(items []json.RawMessage) ([]json.RawMes
 	return filterRawResponsesItems(items, drop), true, nil
 }
 
+func dropStructuredDuplicateCompactionSummaries(items []json.RawMessage) ([]json.RawMessage, bool, error) {
+	summaries := make(map[string][]int)
+
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+		if rawItemType(item) != "message" {
+			continue
+		}
+
+		role, _ := rawJSONStringValue(item["role"])
+		if role != "user" {
+			continue
+		}
+
+		text, ok, err := structuredMessageText(item["content"])
+		if err != nil {
+			return nil, false, fmt.Errorf("extract summary text for item %d: %w", i, err)
+		}
+		if !ok || !isCodexCompactionSummaryMessage(text) {
+			continue
+		}
+		summaries[text] = append(summaries[text], i)
+	}
+
+	drop := make(map[int]bool)
+	for _, indices := range summaries {
+		if len(indices) <= 1 {
+			continue
+		}
+		for _, index := range indices[:len(indices)-1] {
+			drop[index] = true
+		}
+	}
+
+	if len(drop) == 0 {
+		return items, false, nil
+	}
+	return filterRawResponsesItems(items, drop), true, nil
+}
+
 func filterRawResponsesItems(items []json.RawMessage, drop map[int]bool) []json.RawMessage {
 	out := make([]json.RawMessage, 0, len(items)-len(drop))
 	for i, item := range items {
@@ -628,6 +686,24 @@ func canonicalizeRawJSON(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+func structuredMessageText(raw json.RawMessage) (string, bool, error) {
+	if len(raw) == 0 {
+		return "", false, nil
+	}
+	text, err := extractContent(raw)
+	if err != nil {
+		return "", false, err
+	}
+	if text == "" {
+		return "", false, nil
+	}
+	return text, true, nil
+}
+
+func isCodexCompactionSummaryMessage(text string) bool {
+	return strings.HasPrefix(text, codexCompactionSummaryPrefix+"\n")
 }
 
 func isStructuredReadToolName(name string) bool {

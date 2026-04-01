@@ -1619,6 +1619,119 @@ func TestHandleResponses_NativeResponsesFiltersOnlyMessageText(t *testing.T) {
 	}
 }
 
+func TestHandleResponses_NativeResponsesAuditsDuplicateCompactionSummaryCleanup(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-compaction-summary","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			SystemReminders: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	largeSummaryBody := strings.Repeat("compacted summary line\n", 5000)
+	summaryA := codexCompactionSummaryPrefix + "\n" + largeSummaryBody
+	summaryB := codexCompactionSummaryPrefix + "\nDistinct later summary"
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"input": []map[string]any{
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": []map[string]any{{"type": "input_text", "text": summaryA}},
+			},
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": []map[string]any{{"type": "input_text", "text": summaryA}},
+			},
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": []map[string]any{{"type": "input_text", "text": summaryB}},
+			},
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "Continue.",
+			},
+		},
+		"metadata": map[string]any{
+			"session_id": "codex-proof-compaction-summary",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	input := captured["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input items: got %d, want 3", len(input))
+	}
+	if got := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]; got != summaryA {
+		t.Fatalf("expected latest duplicate compaction summary to remain, got %+v", input[0])
+	}
+	if got := input[1].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]; got != summaryB {
+		t.Fatalf("expected distinct summary to remain, got %+v", input[1])
+	}
+
+	audit := fetchAuditPayload(t, addr, "codex-proof-compaction-summary")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if entry.BytesRemoved < 100*1024 {
+		t.Fatalf("expected >100KB removed, got %d bytes", entry.BytesRemoved)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "system_reminders"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
 func TestHandleResponses_NativeResponsesAuditsCodexWasteRemoval(t *testing.T) {
 	var captured map[string]any
 
