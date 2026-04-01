@@ -220,6 +220,32 @@ func TestStartupAuthMode(t *testing.T) {
 	})
 }
 
+func TestFormatRequestDelta(t *testing.T) {
+	t.Run("shows small positive savings even when percent rounds to zero", func(t *testing.T) {
+		got := formatRequestDelta(71042, 70952)
+		want := "-90 bytes, 0% saved"
+		if got != want {
+			t.Fatalf("format delta: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("shows zero delta cleanly", func(t *testing.T) {
+		got := formatRequestDelta(41806, 41806)
+		want := "0 bytes"
+		if got != want {
+			t.Fatalf("format delta: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("shows slight growth cleanly", func(t *testing.T) {
+		got := formatRequestDelta(41653, 41655)
+		want := "+2 bytes"
+		if got != want {
+			t.Fatalf("format delta: got %q, want %q", got, want)
+		}
+	})
+}
+
 func TestAutoDetectProviderSettings(t *testing.T) {
 	getenv := func(values map[string]string) func(string) string {
 		return func(key string) string {

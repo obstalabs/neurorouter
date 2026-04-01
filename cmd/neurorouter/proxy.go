@@ -173,10 +173,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		totalAfter += e.BytesAfter
 		totalSecrets += e.SecretsFound
 
-		saved := 0
-		if e.BytesBefore > 0 {
-			saved = (e.BytesBefore - e.BytesAfter) * 100 / e.BytesBefore
-		}
+		bytesSaved := e.BytesBefore - e.BytesAfter
 		filters := ""
 		if len(e.FiltersRun) > 0 {
 			filters = "  filters=[" + strings.Join(e.FiltersRun, ",") + "]"
@@ -185,13 +182,13 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		if e.SecretsFound > 0 {
 			secrets = fmt.Sprintf("  secrets=%d", e.SecretsFound)
 		}
-		fmt.Fprintf(os.Stderr, "[req] model=%s  bytes=%d→%d (%d%% saved)%s%s\n",
-			e.Model, e.BytesBefore, e.BytesAfter, saved, filters, secrets)
+		fmt.Fprintf(os.Stderr, "[req] model=%s  bytes=%d→%d (%s)%s%s\n",
+			e.Model, e.BytesBefore, e.BytesAfter, formatRequestDelta(e.BytesBefore, e.BytesAfter), filters, secrets)
 
 		if firstRequest {
 			firstRequest = false
-			if saved > 0 {
-				tokensSaved := (e.BytesBefore - e.BytesAfter) / 4
+			if bytesSaved > 0 {
+				tokensSaved := bytesSaved / 4
 				cost := float64(tokensSaved) * 3.0 / 1_000_000
 				fmt.Fprintf(os.Stderr, "\n      NeuroRouter saved %d tokens ($%.4f) on your first request.\n", tokensSaved, cost)
 				fmt.Fprintf(os.Stderr, "      Run 'neurorouter stats' to see cumulative savings.\n\n")
@@ -261,6 +258,25 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+func requestSavedPercent(before, after int) int {
+	if before <= 0 {
+		return 0
+	}
+	return (before - after) * 100 / before
+}
+
+func formatRequestDelta(before, after int) string {
+	delta := before - after
+	switch {
+	case delta > 0:
+		return fmt.Sprintf("-%d bytes, %d%% saved", delta, requestSavedPercent(before, after))
+	case delta < 0:
+		return fmt.Sprintf("+%d bytes", -delta)
+	default:
+		return "0 bytes"
+	}
 }
 
 func autoDetectProviderSettings(target, apiKey string, allowAutoKey bool, getenv func(string) string) autoDetectResult {
