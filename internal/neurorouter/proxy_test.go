@@ -2534,6 +2534,136 @@ func TestHandleResponses_NativeResponsesAuditsShellTranscriptCleanup(t *testing.
 	}
 }
 
+func TestHandleResponses_NativeResponsesAuditsFailedShellRetryCleanup(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-proof-shell-retry","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			FailedRetries: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	largeFailedTranscript := strings.Repeat("FAIL\t./...\nexit status 1\n", 6000)
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"input": []map[string]any{
+			{
+				"type":    "local_shell_call",
+				"call_id": "shell_call_1",
+				"status":  "completed",
+				"action": map[string]any{
+					"type":              "exec",
+					"command":           []string{"go", "test", "./..."},
+					"working_directory": "/repo",
+				},
+			},
+			{
+				"type":      "shell_call_output",
+				"call_id":   "shell_call_1",
+				"output":    largeFailedTranscript,
+				"status":    "completed",
+				"exit_code": 1,
+			},
+			{
+				"type":    "local_shell_call",
+				"call_id": "shell_call_2",
+				"status":  "completed",
+				"action": map[string]any{
+					"type":              "exec",
+					"working_directory": "/repo",
+					"command":           []string{"go", "test", "./..."},
+				},
+			},
+			{
+				"type":      "shell_call_output",
+				"call_id":   "shell_call_2",
+				"output":    "ok\t./...\n",
+				"status":    "completed",
+				"exit_code": 0,
+			},
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "Continue.",
+			},
+		},
+		"metadata": map[string]any{
+			"session_id": "codex-proof-shell-retry",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	input := captured["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input items: got %d, want 3", len(input))
+	}
+	if input[0].(map[string]any)["call_id"] != "shell_call_2" {
+		t.Fatalf("expected successful retry call to remain, got %+v", input[0])
+	}
+	if input[1].(map[string]any)["call_id"] != "shell_call_2" {
+		t.Fatalf("expected successful retry output to remain, got %+v", input[1])
+	}
+
+	audit := fetchAuditPayload(t, addr, "codex-proof-shell-retry")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if entry.BytesRemoved < 100*1024 {
+		t.Fatalf("expected >100KB removed, got %d bytes", entry.BytesRemoved)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "failed_retries"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
 func TestHandleResponses_UnknownModel(t *testing.T) {
 	p := NewProxy(ProxyConfig{
 		Listen:  ":0",

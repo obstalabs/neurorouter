@@ -350,6 +350,17 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 		}
 	}
 
+	if cfg.FailedRetries {
+		next, changed, err := dropStructuredFailedShellRetryItems(out)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		if changed {
+			filters = append(filters, "failed_retries")
+		}
+	}
+
 	if cfg.OrphanedResults {
 		var changed bool
 		next, dedupeChanged, err := dropStructuredSupersededOutputItems(out)
@@ -389,6 +400,15 @@ type structuredShellRecord struct {
 	Index     int
 	CallID    string
 	Signature string
+}
+
+type structuredShellAttempt struct {
+	Index         int
+	CallID        string
+	Signature     string
+	OutputIndices []int
+	Failed        bool
+	Succeeded     bool
 }
 
 func dropStructuredStaleReadItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
@@ -570,6 +590,85 @@ func dropStructuredStaleShellItems(items []json.RawMessage) ([]json.RawMessage, 
 			}
 			drop[record.Index] = true
 			for _, outputIndex := range outputsByCallID[record.CallID] {
+				drop[outputIndex] = true
+			}
+		}
+	}
+
+	if len(drop) == 0 {
+		return items, false, nil
+	}
+	return filterRawResponsesItems(items, drop), true, nil
+}
+
+func dropStructuredFailedShellRetryItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
+	attemptsBySignature := make(map[string][]*structuredShellAttempt)
+	attemptsByCallID := make(map[string]*structuredShellAttempt)
+
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+
+		callID, _ := rawJSONStringValue(item["call_id"])
+		switch rawItemType(item) {
+		case "local_shell_call", "shell_call":
+			if callID == "" {
+				continue
+			}
+			signature, ok, err := structuredShellSignature(item)
+			if err != nil {
+				return nil, false, fmt.Errorf("shell signature for item %d: %w", i, err)
+			}
+			if !ok {
+				continue
+			}
+			attempt := &structuredShellAttempt{
+				Index:     i,
+				CallID:    callID,
+				Signature: signature,
+			}
+			attemptsBySignature[signature] = append(attemptsBySignature[signature], attempt)
+			attemptsByCallID[callID] = attempt
+		case "shell_call_output", "local_shell_call_output":
+			if callID == "" {
+				continue
+			}
+			attempt := attemptsByCallID[callID]
+			if attempt == nil {
+				continue
+			}
+			failed, succeeded, err := structuredShellOutputOutcome(item)
+			if err != nil {
+				return nil, false, fmt.Errorf("shell output outcome for item %d: %w", i, err)
+			}
+			attempt.OutputIndices = append(attempt.OutputIndices, i)
+			attempt.Failed = attempt.Failed || failed
+			attempt.Succeeded = attempt.Succeeded || succeeded
+		}
+	}
+
+	drop := make(map[int]bool)
+	for _, attempts := range attemptsBySignature {
+		if len(attempts) <= 1 {
+			continue
+		}
+		laterSuccess := false
+		for i := len(attempts) - 1; i >= 0; i-- {
+			attempt := attempts[i]
+			if attempt.Succeeded && !attempt.Failed && len(attempt.OutputIndices) > 0 {
+				laterSuccess = true
+				continue
+			}
+			if !laterSuccess {
+				continue
+			}
+			if !attempt.Failed || attempt.Succeeded || len(attempt.OutputIndices) == 0 {
+				continue
+			}
+			drop[attempt.Index] = true
+			for _, outputIndex := range attempt.OutputIndices {
 				drop[outputIndex] = true
 			}
 		}
@@ -764,7 +863,7 @@ func structuredShellSignature(item map[string]json.RawMessage) (string, bool, er
 	default:
 		return "", false, nil
 	}
-	signature, err := canonicalizeRawItemWithoutFields(item, "call_id", "id")
+	signature, err := canonicalizeRawItemWithoutFields(item, "call_id", "id", "status")
 	if err != nil {
 		return "", false, err
 	}
@@ -790,6 +889,39 @@ func structuredShellOutputSignature(item map[string]json.RawMessage) (string, bo
 	return signature, true, nil
 }
 
+func structuredShellOutputOutcome(item map[string]json.RawMessage) (bool, bool, error) {
+	exitCode, hasExitCode, err := rawJSONIntValue(item["exit_code"])
+	if err != nil {
+		return false, false, err
+	}
+	if !hasExitCode {
+		exitCode, hasExitCode, err = rawJSONIntValue(item["exitCode"])
+		if err != nil {
+			return false, false, err
+		}
+	}
+
+	status, _ := rawJSONStringValue(item["status"])
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed", "error", "cancelled", "canceled":
+		return true, false, nil
+	}
+
+	if hasExitCode {
+		if exitCode != 0 {
+			return true, false, nil
+		}
+		return false, true, nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "succeeded", "success":
+		return false, true, nil
+	default:
+		return false, false, nil
+	}
+}
+
 func canonicalizeRawJSON(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
 		return "", nil
@@ -803,6 +935,24 @@ func canonicalizeRawJSON(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+func rawJSONIntValue(raw json.RawMessage) (int, bool, error) {
+	if len(raw) == 0 {
+		return 0, false, nil
+	}
+	var out int
+	if err := json.Unmarshal(raw, &out); err == nil {
+		return out, true, nil
+	}
+	var asFloat float64
+	if err := json.Unmarshal(raw, &asFloat); err == nil {
+		out = int(asFloat)
+		if float64(out) == asFloat {
+			return out, true, nil
+		}
+	}
+	return 0, false, fmt.Errorf("decode int value")
 }
 
 func canonicalizeRawItemWithoutFields(item map[string]json.RawMessage, fields ...string) (string, error) {

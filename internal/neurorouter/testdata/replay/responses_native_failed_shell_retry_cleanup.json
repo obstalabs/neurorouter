@@ -1,0 +1,100 @@
+{
+  "name": "responses_native_failed_shell_retry_cleanup",
+  "description": "Drop an earlier explicit failed shell attempt when the same shell action later succeeds on the native Responses path.",
+  "capabilities": {
+    "provider": "openai",
+    "wire_api": "responses",
+    "streaming": true,
+    "responses_items": true,
+    "reasoning_items": true
+  },
+  "filters": {
+    "failed_retries": true
+  },
+  "request": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "local_shell_call",
+        "call_id": "shell_call_1",
+        "status": "completed",
+        "action": {
+          "type": "exec",
+          "command": [
+            "go",
+            "test",
+            "./..."
+          ],
+          "working_directory": "/repo"
+        }
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "shell_call_1",
+        "output": "FAIL\t./...\nexit status 1\n",
+        "status": "completed",
+        "exit_code": 1
+      },
+      {
+        "type": "local_shell_call",
+        "call_id": "shell_call_2",
+        "status": "completed",
+        "action": {
+          "type": "exec",
+          "working_directory": "/repo",
+          "command": [
+            "go",
+            "test",
+            "./..."
+          ]
+        }
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "shell_call_2",
+        "output": "ok\t./...\n",
+        "status": "completed",
+        "exit_code": 0
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Continue."
+      }
+    ]
+  },
+  "expected_filters_run": [
+    "failed_retries"
+  ],
+  "expected_body": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "local_shell_call",
+        "call_id": "shell_call_2",
+        "status": "completed",
+        "action": {
+          "type": "exec",
+          "working_directory": "/repo",
+          "command": [
+            "go",
+            "test",
+            "./..."
+          ]
+        }
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "shell_call_2",
+        "output": "ok\t./...\n",
+        "status": "completed",
+        "exit_code": 0
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Continue."
+      }
+    ]
+  }
+}
