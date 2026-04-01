@@ -308,11 +308,21 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 	var filters []string
 
 	if cfg.StaleReads {
-		next, changed, err := dropStructuredStaleReadItems(out)
+		var changed bool
+		next, readChanged, err := dropStructuredStaleReadItems(out)
 		if err != nil {
 			return nil, err
 		}
 		out = next
+		changed = changed || readChanged
+
+		next, searchChanged, err := dropStructuredStaleSearchItems(out)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		changed = changed || searchChanged
+
 		if changed {
 			filters = append(filters, "stale_reads")
 		}
@@ -336,6 +346,12 @@ type structuredCallRecord struct {
 	Index  int
 	CallID string
 	Path   string
+}
+
+type structuredSearchRecord struct {
+	Index     int
+	CallID    string
+	Signature string
 }
 
 func dropStructuredStaleReadItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
@@ -389,6 +405,60 @@ func dropStructuredStaleReadItems(items []json.RawMessage) ([]json.RawMessage, b
 			if hasWrite && latestWrite > record.Index && latestWrite < last.Index {
 				continue
 			}
+			drop[record.Index] = true
+			for _, outputIndex := range outputsByCallID[record.CallID] {
+				drop[outputIndex] = true
+			}
+		}
+	}
+
+	if len(drop) == 0 {
+		return items, false, nil
+	}
+	return filterRawResponsesItems(items, drop), true, nil
+}
+
+func dropStructuredStaleSearchItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
+	searches := make(map[string][]structuredSearchRecord)
+	outputsByCallID := make(map[string][]int)
+
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+
+		callID, _ := rawJSONStringValue(item["call_id"])
+		switch rawItemType(item) {
+		case "tool_search_call":
+			if callID == "" {
+				continue
+			}
+			signature, ok, err := structuredSearchSignature(item)
+			if err != nil {
+				return nil, false, fmt.Errorf("search signature for item %d: %w", i, err)
+			}
+			if !ok {
+				continue
+			}
+			searches[signature] = append(searches[signature], structuredSearchRecord{
+				Index:     i,
+				CallID:    callID,
+				Signature: signature,
+			})
+		case "tool_search_output":
+			if callID != "" {
+				outputsByCallID[callID] = append(outputsByCallID[callID], i)
+			}
+		}
+	}
+
+	drop := make(map[int]bool)
+	for _, records := range searches {
+		if len(records) <= 1 {
+			continue
+		}
+		for _, record := range records[:len(records)-1] {
 			drop[record.Index] = true
 			for _, outputIndex := range outputsByCallID[record.CallID] {
 				drop[outputIndex] = true
@@ -485,6 +555,33 @@ func extractStructuredPath(raw string) string {
 	}
 	path, _ = rawJSONStringValue(doc["path"])
 	return path
+}
+
+func structuredSearchSignature(item map[string]json.RawMessage) (string, bool, error) {
+	execution, _ := rawJSONStringValue(item["execution"])
+	arguments, err := canonicalizeRawJSON(item["arguments"])
+	if err != nil {
+		return "", false, err
+	}
+	if execution == "" && arguments == "" {
+		return "", false, nil
+	}
+	return execution + "|" + arguments, true, nil
+}
+
+func canonicalizeRawJSON(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func isStructuredReadToolName(name string) bool {

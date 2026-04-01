@@ -1,0 +1,97 @@
+{
+  "name": "responses_native_search_history_cleanup",
+  "description": "Drop stale repeated tool search call/output chains on the native Responses path.",
+  "capabilities": {
+    "provider": "openai",
+    "wire_api": "responses",
+    "streaming": true,
+    "responses_items": true,
+    "reasoning_items": true
+  },
+  "filters": {
+    "stale_reads": true
+  },
+  "request": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "tool_search_call",
+        "call_id": "search_call_1",
+        "execution": "search",
+        "arguments": {
+          "query": "codex openai base url",
+          "provider": "docs"
+        }
+      },
+      {
+        "type": "tool_search_output",
+        "call_id": "search_call_1",
+        "status": "completed",
+        "execution": "search",
+        "tools": [
+          {
+            "title": "Old result"
+          }
+        ]
+      },
+      {
+        "type": "tool_search_call",
+        "call_id": "search_call_2",
+        "execution": "search",
+        "arguments": {
+          "provider": "docs",
+          "query": "codex openai base url"
+        }
+      },
+      {
+        "type": "tool_search_output",
+        "call_id": "search_call_2",
+        "status": "completed",
+        "execution": "search",
+        "tools": [
+          {
+            "title": "Fresh result"
+          }
+        ]
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Summarize the docs findings."
+      }
+    ]
+  },
+  "expected_filters_run": [
+    "stale_reads"
+  ],
+  "expected_body": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "tool_search_call",
+        "call_id": "search_call_2",
+        "execution": "search",
+        "arguments": {
+          "provider": "docs",
+          "query": "codex openai base url"
+        }
+      },
+      {
+        "type": "tool_search_output",
+        "call_id": "search_call_2",
+        "status": "completed",
+        "execution": "search",
+        "tools": [
+          {
+            "title": "Fresh result"
+          }
+        ]
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Summarize the docs findings."
+      }
+    ]
+  }
+}

@@ -1971,6 +1971,144 @@ func TestHandleResponses_NativeResponsesAuditsLargeStructuredCodexWasteRemoval(t
 	}
 }
 
+func TestHandleResponses_NativeResponsesAuditsSearchHistoryCleanup(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-search","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			StaleReads: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	largeSearchTools := make([]map[string]any, 0, 4000)
+	for i := 0; i < 4000; i++ {
+		largeSearchTools = append(largeSearchTools, map[string]any{
+			"title":   fmt.Sprintf("Old result %d", i),
+			"url":     fmt.Sprintf("https://docs.example/%d", i),
+			"snippet": strings.Repeat("stale search result snippet ", 4),
+		})
+	}
+
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"input": []map[string]any{
+			{
+				"type":      "tool_search_call",
+				"call_id":   "search_call_1",
+				"execution": "search",
+				"arguments": map[string]any{
+					"query":    "codex openai base url",
+					"provider": "docs",
+				},
+			},
+			{
+				"type":      "tool_search_output",
+				"call_id":   "search_call_1",
+				"status":    "completed",
+				"execution": "search",
+				"tools":     largeSearchTools,
+			},
+			{
+				"type":      "tool_search_call",
+				"call_id":   "search_call_2",
+				"execution": "search",
+				"arguments": map[string]any{
+					"provider": "docs",
+					"query":    "codex openai base url",
+				},
+			},
+			{
+				"type":      "tool_search_output",
+				"call_id":   "search_call_2",
+				"status":    "completed",
+				"execution": "search",
+				"tools": []map[string]any{
+					{"title": "Fresh result", "url": "https://docs.example/fresh"},
+				},
+			},
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "Summarize the docs findings.",
+			},
+		},
+		"metadata": map[string]any{
+			"session_id": "codex-proof-search-history",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	input := captured["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input items: got %d, want 3", len(input))
+	}
+	if input[0].(map[string]any)["call_id"] != "search_call_2" {
+		t.Fatalf("expected latest search call to remain, got %+v", input[0])
+	}
+	if input[1].(map[string]any)["call_id"] != "search_call_2" {
+		t.Fatalf("expected latest search output to remain, got %+v", input[1])
+	}
+
+	audit := fetchAuditPayload(t, addr, "codex-proof-search-history")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if entry.BytesRemoved < 50*1024 {
+		t.Fatalf("expected >50KB removed, got %d bytes", entry.BytesRemoved)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "stale_reads"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
 func TestHandleResponses_UnknownModel(t *testing.T) {
 	p := NewProxy(ProxyConfig{
 		Listen:  ":0",

@@ -266,6 +266,66 @@ func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleReadsAndOrphaned
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleSearchChains(t *testing.T) {
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"tool_search_call","call_id":"search_call_1","execution":"search","arguments":{"query":"codex openai base url","provider":"docs"}},
+			{"type":"tool_search_output","call_id":"search_call_1","status":"completed","execution":"search","tools":[{"title":"Old result"}]},
+			{"type":"tool_search_call","call_id":"search_call_2","execution":"search","arguments":{"provider":"docs","query":"codex openai base url"}},
+			{"type":"tool_search_output","call_id":"search_call_2","status":"completed","execution":"search","tools":[{"title":"Fresh result"}]},
+			{"type":"message","role":"user","content":"Summarize the docs findings."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "tool_search_call"},
+			{Type: "tool_search_output"},
+			{Type: "tool_search_call"},
+			{Type: "tool_search_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Summarize the docs findings."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		StaleReads: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "stale_reads"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input length: got %d, want 3", len(input))
+	}
+	if input[0].(map[string]any)["call_id"] != "search_call_2" {
+		t.Fatalf("expected latest search call to remain, got %+v", input[0])
+	}
+	if input[1].(map[string]any)["call_id"] != "search_call_2" {
+		t.Fatalf("expected latest search output to remain, got %+v", input[1])
+	}
+	if input[2].(map[string]any)["type"] != "message" {
+		t.Fatalf("user message should remain, got %+v", input[2])
+	}
+}
+
 func TestTranslateRequest_FieldMapping(t *testing.T) {
 	temp := 0.7
 	topP := 0.9
