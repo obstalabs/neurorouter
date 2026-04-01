@@ -2897,6 +2897,115 @@ func TestHandleResponses_NativeResponsesAuditsOversizedShellOutputTruncation(t *
 	}
 }
 
+func TestHandleResponses_NativeResponsesAuditsReadStyleFunctionOutputShaping(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-proof-function-output-truncate","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			OversizedBlocks: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	largeBody := strings.Repeat("  1737\tfunc TestSomething(t *testing.T) {}\n", 5000)
+	transcript := testReadStyleFunctionOutputTranscript(
+		`/bin/zsh -lc "nl -ba internal/neurorouter/proxy_test.go | sed -n '1737,2898p'"`,
+		largeBody,
+	)
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"input": []map[string]any{
+			{
+				"type":    "function_call_output",
+				"call_id": "call_read_1",
+				"output":  transcript,
+			},
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "Continue.",
+			},
+		},
+		"metadata": map[string]any{
+			"session_id": "codex-proof-function-output-truncate",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	input := captured["input"].([]any)
+	if len(input) != 2 {
+		t.Fatalf("input items: got %d, want 2", len(input))
+	}
+	output := input[0].(map[string]any)["output"].(string)
+	if !strings.Contains(output, "[truncated by neurorouter") {
+		t.Fatalf("missing truncation marker: %q", output)
+	}
+	if !strings.Contains(output, "Command: /bin/zsh -lc") {
+		t.Fatalf("command prefix should remain: %q", output)
+	}
+	if !strings.Contains(output, "func TestSomething") {
+		t.Fatalf("expected retained body context: %q", output)
+	}
+
+	audit := fetchAuditPayload(t, addr, "codex-proof-function-output-truncate")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if entry.BytesRemoved < 100*1024 {
+		t.Fatalf("expected >100KB removed, got %d bytes", entry.BytesRemoved)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
 func TestHandleResponses_UnknownModel(t *testing.T) {
 	p := NewProxy(ProxyConfig{
 		Listen:  ":0",

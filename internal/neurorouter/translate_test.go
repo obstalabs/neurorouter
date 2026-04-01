@@ -878,6 +878,106 @@ func TestRewriteResponsesRequestWithConfig_KeepsShellOutputsWhenCapDisabled(t *t
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_TruncatesReadStyleFunctionOutputs(t *testing.T) {
+	largeBody := strings.Repeat("  1737\tfunc TestSomething(t *testing.T) {}\n", 512)
+	transcript := testReadStyleFunctionOutputTranscript(
+		`/bin/zsh -lc "nl -ba internal/neurorouter/proxy_test.go | sed -n '1737,2898p'"`,
+		largeBody,
+	)
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"function_call_output","call_id":"call_read_1","output":` + strconv.Quote(transcript) + `},
+			{"type":"message","role":"user","content":"Continue."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "function_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	expectedOutput, changed := truncateReadStyleFunctionTranscript(transcript, defaultStructuredReadOutputMax)
+	if !changed {
+		t.Fatal("expected read-style transcript to truncate")
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	output := input[0].(map[string]any)["output"].(string)
+	if output != expectedOutput {
+		t.Fatalf("unexpected truncated output:\n got: %q\nwant: %q", output, expectedOutput)
+	}
+	if !strings.Contains(output, "[truncated by neurorouter") {
+		t.Fatalf("missing truncation marker: %q", output)
+	}
+	if !strings.Contains(output, "Command: /bin/zsh -lc") {
+		t.Fatalf("missing command prefix: %q", output)
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_KeepsNonReadFunctionOutputs(t *testing.T) {
+	largeBody := strings.Repeat("PASS\n", 6000)
+	transcript := testReadStyleFunctionOutputTranscript(`/bin/zsh -lc "go test ./..."`, largeBody)
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"function_call_output","call_id":"call_exec_1","output":` + strconv.Quote(transcript) + `},
+			{"type":"message","role":"user","content":"Continue."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "function_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if len(result.FiltersRun) != 0 {
+		t.Fatalf("expected no truncation, got %v", result.FiltersRun)
+	}
+	if result.BytesBefore != result.BytesAfter {
+		t.Fatalf("expected no rewrite size change, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+}
+
 func TestTranslateRequest_FieldMapping(t *testing.T) {
 	temp := 0.7
 	topP := 0.9
@@ -908,6 +1008,15 @@ func TestTranslateRequest_FieldMapping(t *testing.T) {
 	if !chat.Stream {
 		t.Fatal("stream should be true")
 	}
+}
+
+func testReadStyleFunctionOutputTranscript(command, body string) string {
+	return "Command: " + command + "\n" +
+		"Chunk ID: chunk_test\n" +
+		"Wall time: 0.0000 seconds\n" +
+		"Process exited with code 0\n" +
+		"Original token count: 2048\n" +
+		"Output:\n" + body
 }
 
 func TestTranslateResponse_Basic(t *testing.T) {

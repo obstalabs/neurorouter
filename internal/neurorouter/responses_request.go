@@ -11,6 +11,7 @@ const instructionMessageSource = "instructions"
 const (
 	structuredShellOutputHeadShare  = 1
 	structuredShellOutputShareTotal = 3
+	defaultStructuredReadOutputMax  = 16 * 1024
 )
 
 // codexCompactionSummaryPrefix mirrors Codex's SUMMARY_PREFIX template so we can
@@ -415,15 +416,31 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 		}
 	}
 
+	oversizedChanged := false
+	if cfg.OversizedBlocks {
+		threshold := cfg.StructuredShellMaxBytes
+		if threshold <= 0 {
+			threshold = defaultStructuredReadOutputMax
+		}
+		next, changed, err := truncateStructuredOversizedReadFunctionOutputItems(out, threshold)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		oversizedChanged = oversizedChanged || changed
+	}
+
 	if cfg.StructuredShellMaxBytes > 0 {
 		next, changed, err := truncateStructuredOversizedShellOutputItems(out, cfg.StructuredShellMaxBytes)
 		if err != nil {
 			return nil, err
 		}
 		out = next
-		if changed {
-			filters = append(filters, "oversized_blocks")
-		}
+		oversizedChanged = oversizedChanged || changed
+	}
+
+	if oversizedChanged {
+		filters = append(filters, "oversized_blocks")
 	}
 
 	return &structuredCleanupResult{Items: out, FiltersRun: filters}, nil
@@ -829,6 +846,58 @@ func truncateStructuredOversizedShellOutputItems(items []json.RawMessage, thresh
 	return out, true, nil
 }
 
+func truncateStructuredOversizedReadFunctionOutputItems(items []json.RawMessage, threshold int) ([]json.RawMessage, bool, error) {
+	out := append([]json.RawMessage(nil), items...)
+	changed := false
+
+	for i, rawItem := range items {
+		rewritten, itemChanged, err := truncateStructuredOversizedReadFunctionOutputItem(rawItem, threshold)
+		if err != nil {
+			return nil, false, fmt.Errorf("truncate read-style function output item %d: %w", i, err)
+		}
+		if !itemChanged {
+			continue
+		}
+		out[i] = rewritten
+		changed = true
+	}
+
+	if !changed {
+		return items, false, nil
+	}
+	return out, true, nil
+}
+
+func truncateStructuredOversizedReadFunctionOutputItem(rawItem json.RawMessage, threshold int) (json.RawMessage, bool, error) {
+	item, err := decodeRawResponsesItem(rawItem)
+	if err != nil {
+		return nil, false, err
+	}
+
+	switch rawItemType(item) {
+	case "function_call_output", "custom_tool_call_output":
+	default:
+		return rawItem, false, nil
+	}
+
+	output, err := rawJSONStringValue(item["output"])
+	if err != nil || output == "" {
+		return rawItem, false, nil
+	}
+
+	rewrittenOutput, changed := truncateReadStyleFunctionTranscript(output, threshold)
+	if !changed {
+		return rawItem, false, nil
+	}
+
+	item["output"] = marshalRawJSONString(rewrittenOutput)
+	out, err := json.Marshal(item)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
 func truncateStructuredOversizedShellOutputItem(rawItem json.RawMessage, threshold int) (json.RawMessage, bool, error) {
 	item, err := decodeRawResponsesItem(rawItem)
 	if err != nil {
@@ -1034,6 +1103,62 @@ func truncateStructuredShellOutput(output string, threshold int) string {
 		return output[:headBytes] + marker
 	}
 	return output[:headBytes] + marker + output[len(output)-tailBytes:]
+}
+
+func truncateReadStyleFunctionTranscript(output string, threshold int) (string, bool) {
+	command, prefix, body, ok := parseReadStyleFunctionTranscript(output)
+	if !ok || len(body) <= threshold || !isReadStyleFunctionCommand(command) {
+		return "", false
+	}
+
+	rewritten := prefix + truncateStructuredShellOutput(body, threshold)
+	if len(rewritten) >= len(output) {
+		return "", false
+	}
+	return rewritten, true
+}
+
+func parseReadStyleFunctionTranscript(output string) (string, string, string, bool) {
+	if !strings.HasPrefix(output, "Command: ") {
+		return "", "", "", false
+	}
+
+	newline := strings.IndexByte(output, '\n')
+	if newline == -1 {
+		return "", "", "", false
+	}
+	command := strings.TrimSpace(strings.TrimPrefix(output[:newline], "Command: "))
+	if command == "" {
+		return "", "", "", false
+	}
+
+	const outputMarker = "\nOutput:\n"
+	markerIndex := strings.Index(output, outputMarker)
+	if markerIndex == -1 {
+		return "", "", "", false
+	}
+
+	prefixEnd := markerIndex + len(outputMarker)
+	body := output[prefixEnd:]
+	if body == "" {
+		return "", "", "", false
+	}
+	return command, output[:prefixEnd], body, true
+}
+
+func isReadStyleFunctionCommand(command string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(command))
+	return strings.Contains(normalized, "sed -n") ||
+		strings.Contains(normalized, "nl -ba") ||
+		strings.Contains(normalized, "cat ") ||
+		strings.Contains(normalized, "rg -n") ||
+		strings.Contains(normalized, "rg --files") ||
+		strings.Contains(normalized, "find ") ||
+		strings.Contains(normalized, "wc -l") ||
+		strings.Contains(normalized, "ls ") ||
+		strings.Contains(normalized, "head ") ||
+		strings.Contains(normalized, "tail ") ||
+		strings.Contains(normalized, "git show")
 }
 
 func canonicalizeRawJSON(raw json.RawMessage) (string, error) {
