@@ -338,6 +338,13 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 		out = next
 		changed = changed || searchChanged
 
+		next, shellChanged, err := dropStructuredStaleShellItems(out)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		changed = changed || shellChanged
+
 		if changed {
 			filters = append(filters, "stale_reads")
 		}
@@ -373,6 +380,12 @@ type structuredCallRecord struct {
 }
 
 type structuredSearchRecord struct {
+	Index     int
+	CallID    string
+	Signature string
+}
+
+type structuredShellRecord struct {
 	Index     int
 	CallID    string
 	Signature string
@@ -483,6 +496,78 @@ func dropStructuredStaleSearchItems(items []json.RawMessage) ([]json.RawMessage,
 			continue
 		}
 		for _, record := range records[:len(records)-1] {
+			drop[record.Index] = true
+			for _, outputIndex := range outputsByCallID[record.CallID] {
+				drop[outputIndex] = true
+			}
+		}
+	}
+
+	if len(drop) == 0 {
+		return items, false, nil
+	}
+	return filterRawResponsesItems(items, drop), true, nil
+}
+
+func dropStructuredStaleShellItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
+	shells := make(map[string][]structuredShellRecord)
+	outputsByCallID := make(map[string][]int)
+	outputSignaturesByCallID := make(map[string][]string)
+
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+
+		callID, _ := rawJSONStringValue(item["call_id"])
+		switch rawItemType(item) {
+		case "local_shell_call", "shell_call":
+			if callID == "" {
+				continue
+			}
+			signature, ok, err := structuredShellSignature(item)
+			if err != nil {
+				return nil, false, fmt.Errorf("shell signature for item %d: %w", i, err)
+			}
+			if !ok {
+				continue
+			}
+			shells[signature] = append(shells[signature], structuredShellRecord{
+				Index:     i,
+				CallID:    callID,
+				Signature: signature,
+			})
+		case "shell_call_output", "local_shell_call_output":
+			if callID == "" {
+				continue
+			}
+			signature, ok, err := structuredShellOutputSignature(item)
+			if err != nil {
+				return nil, false, fmt.Errorf("shell output signature for item %d: %w", i, err)
+			}
+			if !ok {
+				continue
+			}
+			outputsByCallID[callID] = append(outputsByCallID[callID], i)
+			outputSignaturesByCallID[callID] = append(outputSignaturesByCallID[callID], signature)
+		}
+	}
+
+	drop := make(map[int]bool)
+	for _, records := range shells {
+		if len(records) <= 1 {
+			continue
+		}
+		latest := records[len(records)-1]
+		latestOutputSignatures, ok := outputSignaturesByCallID[latest.CallID]
+		if !ok || len(latestOutputSignatures) == 0 {
+			continue
+		}
+		for _, record := range records[:len(records)-1] {
+			if !equalStringSlices(outputSignaturesByCallID[record.CallID], latestOutputSignatures) {
+				continue
+			}
 			drop[record.Index] = true
 			for _, outputIndex := range outputsByCallID[record.CallID] {
 				drop[outputIndex] = true
@@ -673,6 +758,38 @@ func structuredSearchSignature(item map[string]json.RawMessage) (string, bool, e
 	return execution + "|" + arguments, true, nil
 }
 
+func structuredShellSignature(item map[string]json.RawMessage) (string, bool, error) {
+	switch rawItemType(item) {
+	case "local_shell_call", "shell_call":
+	default:
+		return "", false, nil
+	}
+	signature, err := canonicalizeRawItemWithoutFields(item, "call_id", "id")
+	if err != nil {
+		return "", false, err
+	}
+	if signature == "" {
+		return "", false, nil
+	}
+	return signature, true, nil
+}
+
+func structuredShellOutputSignature(item map[string]json.RawMessage) (string, bool, error) {
+	switch rawItemType(item) {
+	case "shell_call_output", "local_shell_call_output":
+	default:
+		return "", false, nil
+	}
+	signature, err := canonicalizeRawItemWithoutFields(item, "call_id", "id")
+	if err != nil {
+		return "", false, err
+	}
+	if signature == "" {
+		return "", false, nil
+	}
+	return signature, true, nil
+}
+
 func canonicalizeRawJSON(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
 		return "", nil
@@ -686,6 +803,24 @@ func canonicalizeRawJSON(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+func canonicalizeRawItemWithoutFields(item map[string]json.RawMessage, fields ...string) (string, error) {
+	if len(item) == 0 {
+		return "", nil
+	}
+	clone := make(map[string]json.RawMessage, len(item))
+	for key, value := range item {
+		clone[key] = append(json.RawMessage(nil), value...)
+	}
+	for _, field := range fields {
+		delete(clone, field)
+	}
+	data, err := json.Marshal(clone)
+	if err != nil {
+		return "", err
+	}
+	return canonicalizeRawJSON(data)
 }
 
 func structuredMessageText(raw json.RawMessage) (string, bool, error) {
@@ -741,4 +876,16 @@ func mergeFilterNames(base, extra []string) []string {
 		seen[name] = true
 	}
 	return out
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

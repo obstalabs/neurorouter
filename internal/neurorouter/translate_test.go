@@ -530,6 +530,117 @@ func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleSearchChains(t *
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_StripsDuplicateShellTranscriptChains(t *testing.T) {
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"local_shell_call","call_id":"shell_call_1","status":"completed","action":{"type":"exec","command":["git","status"],"working_directory":"/repo"}},
+			{"type":"shell_call_output","call_id":"shell_call_1","output":"On branch main\nnothing to commit\n","status":"completed"},
+			{"type":"local_shell_call","call_id":"shell_call_2","status":"completed","action":{"type":"exec","working_directory":"/repo","command":["git","status"]}},
+			{"type":"shell_call_output","call_id":"shell_call_2","status":"completed","output":"On branch main\nnothing to commit\n"},
+			{"type":"message","role":"user","content":"Continue."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "local_shell_call"},
+			{Type: "shell_call_output"},
+			{Type: "local_shell_call"},
+			{Type: "shell_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		StaleReads: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "stale_reads"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input length: got %d, want 3", len(input))
+	}
+	if input[0].(map[string]any)["call_id"] != "shell_call_2" {
+		t.Fatalf("expected latest shell call to remain, got %+v", input[0])
+	}
+	if input[1].(map[string]any)["call_id"] != "shell_call_2" {
+		t.Fatalf("expected latest shell output to remain, got %+v", input[1])
+	}
+	if input[2].(map[string]any)["type"] != "message" {
+		t.Fatalf("user message should remain, got %+v", input[2])
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_KeepsDistinctShellTranscriptChains(t *testing.T) {
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"local_shell_call","call_id":"shell_call_1","status":"completed","action":{"type":"exec","command":["git","status"],"working_directory":"/repo"}},
+			{"type":"shell_call_output","call_id":"shell_call_1","output":"On branch main\nnothing to commit\n","status":"completed"},
+			{"type":"local_shell_call","call_id":"shell_call_2","status":"completed","action":{"type":"exec","working_directory":"/repo","command":["git","status"]}},
+			{"type":"shell_call_output","call_id":"shell_call_2","output":"On branch feature\nmodified: README.md\n","status":"completed"},
+			{"type":"message","role":"user","content":"Continue."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "local_shell_call"},
+			{Type: "shell_call_output"},
+			{Type: "local_shell_call"},
+			{Type: "shell_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		StaleReads: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if len(result.FiltersRun) != 0 {
+		t.Fatalf("expected no shell cleanup for distinct outputs, got %v", result.FiltersRun)
+	}
+	if result.BytesBefore != result.BytesAfter {
+		t.Fatalf("expected no rewrite size change, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 5 {
+		t.Fatalf("input length: got %d, want 5", len(input))
+	}
+}
+
 func TestTranslateRequest_FieldMapping(t *testing.T) {
 	temp := 0.7
 	topP := 0.9

@@ -1,0 +1,94 @@
+{
+  "name": "responses_native_shell_transcript_cleanup",
+  "description": "Drop earlier exact-duplicate native shell call/output chains while preserving the latest shell transcript.",
+  "capabilities": {
+    "provider": "openai",
+    "wire_api": "responses",
+    "streaming": true,
+    "responses_items": true,
+    "reasoning_items": true
+  },
+  "filters": {
+    "stale_reads": true
+  },
+  "request": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "local_shell_call",
+        "call_id": "shell_call_1",
+        "status": "completed",
+        "action": {
+          "type": "exec",
+          "command": [
+            "git",
+            "status"
+          ],
+          "working_directory": "/repo"
+        }
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "shell_call_1",
+        "output": "On branch main\nnothing to commit\n",
+        "status": "completed"
+      },
+      {
+        "type": "local_shell_call",
+        "call_id": "shell_call_2",
+        "status": "completed",
+        "action": {
+          "type": "exec",
+          "working_directory": "/repo",
+          "command": [
+            "git",
+            "status"
+          ]
+        }
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "shell_call_2",
+        "output": "On branch main\nnothing to commit\n",
+        "status": "completed"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Continue."
+      }
+    ]
+  },
+  "expected_filters_run": [
+    "stale_reads"
+  ],
+  "expected_body": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "local_shell_call",
+        "call_id": "shell_call_2",
+        "status": "completed",
+        "action": {
+          "type": "exec",
+          "working_directory": "/repo",
+          "command": [
+            "git",
+            "status"
+          ]
+        }
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "shell_call_2",
+        "output": "On branch main\nnothing to commit\n",
+        "status": "completed"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Continue."
+      }
+    ]
+  }
+}
