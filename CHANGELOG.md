@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.5] - 2026-04-01
+
+### Changed
+- Repointed release metadata, README install guidance, and update checks to the `obstalabs` repository and package feeds for the ownership transfer
+
 ## [0.1.4] - 2026-04-01
 
 ### Fixed
