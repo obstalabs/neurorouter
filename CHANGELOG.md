@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.7] - 2026-04-01
+
+### Fixed
+- Native Responses cleanup now removes duplicate shell transcript chains and superseded failed shell retries, so stale Codex shell history is stripped before it reaches the upstream
+
+### Changed
+- Added an opt-in `--shell-max-output-bytes` cap that truncates oversized native shell outputs while preserving the tail error or success signal
+- Per-request proxy logging now shows signed byte deltas so small savings are visible instead of rounding away into `0% saved`
+
 ## [0.1.6] - 2026-04-01
 
 ### Fixed
