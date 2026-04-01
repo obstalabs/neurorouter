@@ -1,0 +1,193 @@
+{
+  "name": "responses_native_search_output_compaction",
+  "description": "Compact large retained tool_search_output payloads on the native Responses path.",
+  "capabilities": {
+    "provider": "openai",
+    "wire_api": "responses",
+    "streaming": true,
+    "responses_items": true,
+    "reasoning_items": true
+  },
+  "filters": {
+    "oversized_blocks": true
+  },
+  "request": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "tool_search_output",
+        "call_id": "search_call_1",
+        "status": "completed",
+        "execution": "search",
+        "tools": [
+          {
+            "title": "Result 0",
+            "url": "https://docs.example/0",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 1",
+            "url": "https://docs.example/1",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 2",
+            "url": "https://docs.example/2",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 3",
+            "url": "https://docs.example/3",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 4",
+            "url": "https://docs.example/4",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 5",
+            "url": "https://docs.example/5",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 6",
+            "url": "https://docs.example/6",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 7",
+            "url": "https://docs.example/7",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 8",
+            "url": "https://docs.example/8",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 9",
+            "url": "https://docs.example/9",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 10",
+            "url": "https://docs.example/10",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 11",
+            "url": "https://docs.example/11",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 12",
+            "url": "https://docs.example/12",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 13",
+            "url": "https://docs.example/13",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 14",
+            "url": "https://docs.example/14",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 15",
+            "url": "https://docs.example/15",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 16",
+            "url": "https://docs.example/16",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 17",
+            "url": "https://docs.example/17",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 18",
+            "url": "https://docs.example/18",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 19",
+            "url": "https://docs.example/19",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          }
+        ]
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Summarize the docs findings."
+      }
+    ]
+  },
+  "expected_filters_run": [
+    "oversized_blocks"
+  ],
+  "expected_body": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "tool_search_output",
+        "call_id": "search_call_1",
+        "status": "completed",
+        "execution": "search",
+        "tools": [
+          {
+            "title": "Result 0",
+            "url": "https://docs.example/0",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 1",
+            "url": "https://docs.example/1",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 2",
+            "url": "https://docs.example/2",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 3",
+            "url": "https://docs.example/3",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 4",
+            "url": "https://docs.example/4",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 5",
+            "url": "https://docs.example/5",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 6",
+            "url": "https://docs.example/6",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          },
+          {
+            "title": "Result 7",
+            "url": "https://docs.example/7",
+            "snippet": "search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet search result snippet "
+          }
+        ]
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Summarize the docs findings."
+      }
+    ]
+  }
+}

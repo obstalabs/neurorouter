@@ -9,9 +9,11 @@ import (
 const instructionMessageSource = "instructions"
 
 const (
-	structuredShellOutputHeadShare  = 1
-	structuredShellOutputShareTotal = 3
-	defaultStructuredReadOutputMax  = 16 * 1024
+	structuredShellOutputHeadShare   = 1
+	structuredShellOutputShareTotal  = 3
+	defaultStructuredReadOutputMax   = 16 * 1024
+	defaultStructuredSearchOutputMax = 8 * 1024
+	defaultStructuredSearchToolsKeep = 8
 )
 
 // codexCompactionSummaryPrefix mirrors Codex's SUMMARY_PREFIX template so we can
@@ -418,11 +420,14 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 
 	oversizedChanged := false
 	if cfg.OversizedBlocks {
-		threshold := cfg.StructuredShellMaxBytes
-		if threshold <= 0 {
-			threshold = defaultStructuredReadOutputMax
+		next, changed, err := truncateStructuredOversizedReadFunctionOutputItems(out, defaultStructuredReadOutputMax)
+		if err != nil {
+			return nil, err
 		}
-		next, changed, err := truncateStructuredOversizedReadFunctionOutputItems(out, threshold)
+		out = next
+		oversizedChanged = oversizedChanged || changed
+
+		next, changed, err = compactStructuredOversizedSearchOutputItems(out, defaultStructuredSearchOutputMax, defaultStructuredSearchToolsKeep)
 		if err != nil {
 			return nil, err
 		}
@@ -864,6 +869,70 @@ func truncateStructuredOversizedReadFunctionOutputItems(items []json.RawMessage,
 
 	if !changed {
 		return items, false, nil
+	}
+	return out, true, nil
+}
+
+func compactStructuredOversizedSearchOutputItems(items []json.RawMessage, threshold, maxTools int) ([]json.RawMessage, bool, error) {
+	out := append([]json.RawMessage(nil), items...)
+	changed := false
+
+	for i, rawItem := range items {
+		rewritten, itemChanged, err := compactStructuredOversizedSearchOutputItem(rawItem, threshold, maxTools)
+		if err != nil {
+			return nil, false, fmt.Errorf("compact search output item %d: %w", i, err)
+		}
+		if !itemChanged {
+			continue
+		}
+		out[i] = rewritten
+		changed = true
+	}
+
+	if !changed {
+		return items, false, nil
+	}
+	return out, true, nil
+}
+
+func compactStructuredOversizedSearchOutputItem(rawItem json.RawMessage, threshold, maxTools int) (json.RawMessage, bool, error) {
+	if threshold <= 0 || maxTools <= 0 {
+		return rawItem, false, nil
+	}
+
+	item, err := decodeRawResponsesItem(rawItem)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if rawItemType(item) != "tool_search_output" {
+		return rawItem, false, nil
+	}
+
+	rawTools, ok := item["tools"]
+	if !ok || len(rawTools) <= threshold {
+		return rawItem, false, nil
+	}
+
+	var tools []json.RawMessage
+	if err := json.Unmarshal(rawTools, &tools); err != nil {
+		return rawItem, false, nil
+	}
+	if len(tools) <= maxTools {
+		return rawItem, false, nil
+	}
+
+	item["tools"], err = json.Marshal(tools[:maxTools])
+	if err != nil {
+		return nil, false, err
+	}
+
+	out, err := json.Marshal(item)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(out) >= len(rawItem) {
+		return rawItem, false, nil
 	}
 	return out, true, nil
 }

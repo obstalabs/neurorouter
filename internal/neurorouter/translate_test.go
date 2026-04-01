@@ -563,6 +563,95 @@ func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleSearchChains(t *
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_CompactsOversizedSearchOutputs(t *testing.T) {
+	tools := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		tools = append(tools, `{"title":"Result `+strconv.Itoa(i)+`","url":"https://docs.example/`+strconv.Itoa(i)+`","snippet":"`+strings.Repeat("search result snippet ", 64)+`"}`)
+	}
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"tool_search_output","call_id":"search_call_1","status":"completed","execution":"search","tools":[` + strings.Join(tools, ",") + `]},
+			{"type":"message","role":"user","content":"Summarize the docs findings."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "tool_search_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Summarize the docs findings."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	compactedTools := input[0].(map[string]any)["tools"].([]any)
+	if got, want := len(compactedTools), defaultStructuredSearchToolsKeep; got != want {
+		t.Fatalf("tools length: got %d, want %d", got, want)
+	}
+	if compactedTools[0].(map[string]any)["title"] != "Result 0" {
+		t.Fatalf("expected top-ranked result to remain first, got %+v", compactedTools[0])
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_KeepsSmallSearchOutputs(t *testing.T) {
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"tool_search_output","call_id":"search_call_1","status":"completed","execution":"search","tools":[{"title":"Result 0","url":"https://docs.example/0","snippet":"Short snippet"}]},
+			{"type":"message","role":"user","content":"Summarize the docs findings."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "tool_search_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Summarize the docs findings."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if len(result.FiltersRun) != 0 {
+		t.Fatalf("expected no compaction, got %v", result.FiltersRun)
+	}
+	if result.BytesBefore != result.BytesAfter {
+		t.Fatalf("expected no rewrite size change, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+}
+
 func TestRewriteResponsesRequestWithConfig_StripsDuplicateShellTranscriptChains(t *testing.T) {
 	rawBody := []byte(`{
 		"model":"gpt-5.4",
