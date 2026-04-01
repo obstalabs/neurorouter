@@ -17,7 +17,7 @@ import (
 )
 
 // UpdateRepo is the GitHub repo to check for releases.
-const UpdateRepo = "ppiankov/neurorouter"
+const UpdateRepo = "obstalabs/neurorouter"
 
 // ReleaseInfo holds metadata from a GitHub release.
 type ReleaseInfo struct {

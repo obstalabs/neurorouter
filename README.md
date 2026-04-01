@@ -1,6 +1,6 @@
 # NeuroRouter
 
-[![CI](https://github.com/ppiankov/neurorouter/actions/workflows/ci.yml/badge.svg)](https://github.com/ppiankov/neurorouter/actions/workflows/ci.yml)
+[![CI](https://github.com/obstalabs/neurorouter/actions/workflows/ci.yml/badge.svg)](https://github.com/obstalabs/neurorouter/actions/workflows/ci.yml)
 [![Go 1.24+](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
@@ -9,10 +9,10 @@ Cleans AI requests before they hit the model. Removes wasted context, blocks sec
 ## Install
 
 ```bash
-brew install ppiankov/tap/neurorouter
+brew install obstalabs/tap/neurorouter
 ```
 
-Or download from [releases](https://github.com/ppiankov/neurorouter/releases/latest).
+Or download from [releases](https://github.com/obstalabs/neurorouter/releases/latest).
 
 ## Quick start
 
