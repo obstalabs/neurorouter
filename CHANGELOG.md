@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.19] - 2026-04-01
+
+### Fixed
+- Native Responses no-op rewrites now preserve the original raw request body, so formatting-only re-marshaling no longer shows fake positive byte growth like `+2 bytes`
+
 ## [0.1.8] - 2026-04-01
 
 ### Fixed
