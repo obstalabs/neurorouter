@@ -1,0 +1,100 @@
+{
+  "name": "responses_native_codex_waste_cleanup",
+  "description": "Remove duplicated system prompt text, stale repeated reads, and orphaned tool results while preserving native Responses items for Codex-style requests.",
+  "capabilities": {
+    "provider": "openai",
+    "wire_api": "responses",
+    "streaming": true,
+    "responses_items": true,
+    "reasoning_items": true
+  },
+  "filters": {
+    "system_reminders": true,
+    "stale_reads": true,
+    "orphaned_results": true
+  },
+  "request": {
+    "model": "gpt-5.4",
+    "instructions": "Follow repo policy.",
+    "input": [
+      {
+        "type": "message",
+        "role": "developer",
+        "content": "Follow repo policy."
+      },
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": "{\"tool_calls\":[{\"id\":\"call_read_1\",\"function\":{\"name\":\"Read\",\"arguments\":{\"file_path\":\"/repo/README.md\"}}}]}"
+      },
+      {
+        "type": "message",
+        "role": "tool",
+        "content": "{\"tool_call_id\":\"call_missing\",\"content\":\"stale orphaned output\"}"
+      },
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": "{\"tool_calls\":[{\"id\":\"call_read_2\",\"function\":{\"name\":\"Read\",\"arguments\":{\"file_path\":\"/repo/README.md\"}}}]}"
+      },
+      {
+        "type": "message",
+        "role": "tool",
+        "content": "{\"tool_call_id\":\"call_read_2\",\"content\":\"fresh output\"}"
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "call_shell",
+        "output": "pwd",
+        "status": "completed"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Summarize the repo."
+      }
+    ],
+    "metadata": {
+      "trace_id": "codex-proof"
+    }
+  },
+  "expected_filters_run": [
+    "system_reminders",
+    "stale_reads",
+    "orphaned_results"
+  ],
+  "expected_body": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "message",
+        "role": "developer",
+        "content": "Follow repo policy."
+      },
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": "{\"tool_calls\":[{\"id\":\"call_read_2\",\"function\":{\"name\":\"Read\",\"arguments\":{\"file_path\":\"/repo/README.md\"}}}]}"
+      },
+      {
+        "type": "message",
+        "role": "tool",
+        "content": "{\"tool_call_id\":\"call_read_2\",\"content\":\"fresh output\"}"
+      },
+      {
+        "type": "shell_call_output",
+        "call_id": "call_shell",
+        "output": "pwd",
+        "status": "completed"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Summarize the repo."
+      }
+    ],
+    "metadata": {
+      "trace_id": "codex-proof"
+    }
+  }
+}
