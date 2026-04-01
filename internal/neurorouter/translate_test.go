@@ -266,6 +266,77 @@ func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleReadsAndOrphaned
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_DropsSupersededStructuredOutputsForSameCallID(t *testing.T) {
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"function_call","call_id":"call_build","name":"Read","arguments":"{\"file_path\":\"/repo/README.md\"}"},
+			{"type":"function_call_output","call_id":"call_build","output":"stale output"},
+			{"type":"function_call_output","call_id":"call_build","output":"fresh output"},
+			{"type":"custom_tool_call","call_id":"call_shell","name":"shell","input":"git status"},
+			{"type":"custom_tool_call_output","call_id":"call_shell","output":"clean"},
+			{"type":"message","role":"user","content":"continue"}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "function_call"},
+			{Type: "function_call_output"},
+			{Type: "function_call_output"},
+			{Type: "custom_tool_call"},
+			{Type: "custom_tool_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"continue"`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OrphanedResults: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "orphaned_results"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 5 {
+		t.Fatalf("input length: got %d, want 5", len(input))
+	}
+	if input[0].(map[string]any)["call_id"] != "call_build" {
+		t.Fatalf("expected function call to remain, got %+v", input[0])
+	}
+	if input[1].(map[string]any)["call_id"] != "call_build" {
+		t.Fatalf("expected latest function output to remain, got %+v", input[1])
+	}
+	if input[1].(map[string]any)["output"] != "fresh output" {
+		t.Fatalf("expected latest function output payload, got %+v", input[1])
+	}
+	if input[2].(map[string]any)["call_id"] != "call_shell" {
+		t.Fatalf("expected distinct custom tool call to remain, got %+v", input[2])
+	}
+	if input[3].(map[string]any)["call_id"] != "call_shell" {
+		t.Fatalf("expected distinct custom tool output to remain, got %+v", input[3])
+	}
+	if input[4].(map[string]any)["type"] != "message" {
+		t.Fatalf("user message should remain, got %+v", input[4])
+	}
+}
+
 func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleSearchChains(t *testing.T) {
 	rawBody := []byte(`{
 		"model":"gpt-5.4",

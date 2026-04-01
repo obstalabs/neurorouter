@@ -329,11 +329,20 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 	}
 
 	if cfg.OrphanedResults {
-		next, changed, err := dropStructuredOrphanedOutputItems(out)
+		var changed bool
+		next, dedupeChanged, err := dropStructuredSupersededOutputItems(out)
 		if err != nil {
 			return nil, err
 		}
 		out = next
+		changed = changed || dedupeChanged
+
+		next, orphanChanged, err := dropStructuredOrphanedOutputItems(out)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		changed = changed || orphanChanged
 		if changed {
 			filters = append(filters, "orphaned_results")
 		}
@@ -508,6 +517,43 @@ func dropStructuredOrphanedOutputItems(items []json.RawMessage) ([]json.RawMessa
 			if !callIDs[callID] {
 				drop[i] = true
 			}
+		}
+	}
+
+	if len(drop) == 0 {
+		return items, false, nil
+	}
+	return filterRawResponsesItems(items, drop), true, nil
+}
+
+func dropStructuredSupersededOutputItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
+	outputsByKey := make(map[string][]int)
+
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+
+		callID, _ := rawJSONStringValue(item["call_id"])
+		if callID == "" {
+			continue
+		}
+
+		switch rawItemType(item) {
+		case "function_call_output", "custom_tool_call_output":
+			key := rawItemType(item) + "|" + callID
+			outputsByKey[key] = append(outputsByKey[key], i)
+		}
+	}
+
+	drop := make(map[int]bool)
+	for _, indices := range outputsByKey {
+		if len(indices) <= 1 {
+			continue
+		}
+		for _, index := range indices[:len(indices)-1] {
+			drop[index] = true
 		}
 	}
 

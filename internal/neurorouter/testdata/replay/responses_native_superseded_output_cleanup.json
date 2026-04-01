@@ -1,0 +1,86 @@
+{
+  "name": "responses_native_superseded_output_cleanup",
+  "description": "Drop superseded structured outputs for the same call_id while preserving the latest valid output and distinct tool results.",
+  "capabilities": {
+    "provider": "openai",
+    "wire_api": "responses",
+    "streaming": true,
+    "responses_items": true,
+    "reasoning_items": true
+  },
+  "filters": {
+    "orphaned_results": true
+  },
+  "request": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "function_call",
+        "call_id": "call_build",
+        "name": "Read",
+        "arguments": "{\"file_path\":\"/repo/README.md\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_build",
+        "output": "stale output"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_build",
+        "output": "fresh output"
+      },
+      {
+        "type": "custom_tool_call",
+        "call_id": "call_shell",
+        "name": "shell",
+        "input": "git status"
+      },
+      {
+        "type": "custom_tool_call_output",
+        "call_id": "call_shell",
+        "output": "clean"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Continue."
+      }
+    ]
+  },
+  "expected_filters_run": [
+    "orphaned_results"
+  ],
+  "expected_body": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "function_call",
+        "call_id": "call_build",
+        "name": "Read",
+        "arguments": "{\"file_path\":\"/repo/README.md\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_build",
+        "output": "fresh output"
+      },
+      {
+        "type": "custom_tool_call",
+        "call_id": "call_shell",
+        "name": "shell",
+        "input": "git status"
+      },
+      {
+        "type": "custom_tool_call_output",
+        "call_id": "call_shell",
+        "output": "clean"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Continue."
+      }
+    ]
+  }
+}
