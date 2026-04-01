@@ -1847,6 +1847,130 @@ func TestHandleResponses_NativeResponsesAuditsLargeCodexWasteRemoval(t *testing.
 	}
 }
 
+func TestHandleResponses_NativeResponsesAuditsLargeStructuredCodexWasteRemoval(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-proof-structured","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			StaleReads:      true,
+			OrphanedResults: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	largeOrphanedOutput := strings.Repeat("structured orphaned tool output line\n", 5000)
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"input": []map[string]any{
+			{
+				"type":      "function_call",
+				"call_id":   "call_read_1",
+				"name":      "Read",
+				"arguments": `{"file_path":"/repo/README.md"}`,
+			},
+			{
+				"type":    "function_call_output",
+				"call_id": "call_read_1",
+				"output":  "stale output",
+			},
+			{
+				"type":    "function_call_output",
+				"call_id": "call_missing",
+				"output":  largeOrphanedOutput,
+			},
+			{
+				"type":      "function_call",
+				"call_id":   "call_read_2",
+				"name":      "Read",
+				"arguments": `{"file_path":"/repo/README.md"}`,
+			},
+			{
+				"type":    "function_call_output",
+				"call_id": "call_read_2",
+				"output":  "fresh output",
+			},
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "Summarize the repo.",
+			},
+		},
+		"metadata": map[string]any{
+			"session_id": "codex-proof-structured",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	input := captured["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input items: got %d, want 3", len(input))
+	}
+	if input[0].(map[string]any)["call_id"] != "call_read_2" {
+		t.Fatalf("expected latest read call to remain, got %+v", input[0])
+	}
+	if input[1].(map[string]any)["call_id"] != "call_read_2" {
+		t.Fatalf("expected latest read output to remain, got %+v", input[1])
+	}
+
+	audit := fetchAuditPayload(t, addr, "codex-proof-structured")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if entry.BytesRemoved < 100*1024 {
+		t.Fatalf("expected >100KB removed, got %d bytes", entry.BytesRemoved)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "stale_reads,orphaned_results"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
 func TestHandleResponses_UnknownModel(t *testing.T) {
 	p := NewProxy(ProxyConfig{
 		Listen:  ":0",

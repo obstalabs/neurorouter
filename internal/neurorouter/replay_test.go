@@ -74,13 +74,13 @@ func TestReplayFixtures(t *testing.T) {
 				t.Fatalf("process pipeline: %v", err)
 			}
 
-			if !slices.Equal(result.FiltersRun, fixture.ExpectedFiltersRun) {
-				t.Fatalf("filters_run: got %v, want %v", result.FiltersRun, fixture.ExpectedFiltersRun)
-			}
-
-			gotBody, err := replayExpectedBody(&req, fixture.Request, original, filtered, fixture.Capabilities)
+			gotBody, extraFilters, err := replayExpectedBody(&req, fixture.Request, original, filtered, fixture.Capabilities, fixture.Filters.filterConfig())
 			if err != nil {
 				t.Fatalf("build replay output: %v", err)
+			}
+			combinedFilters := mergeFilterNames(result.FiltersRun, extraFilters)
+			if !slices.Equal(combinedFilters, fixture.ExpectedFiltersRun) {
+				t.Fatalf("filters_run: got %v, want %v", combinedFilters, fixture.ExpectedFiltersRun)
 			}
 
 			assertJSONEqual(t, gotBody, fixture.ExpectedBody)
@@ -104,17 +104,25 @@ func loadReplayFixture(t *testing.T, path string) replayFixture {
 	return fixture
 }
 
-func replayExpectedBody(req *ResponsesRequest, rawBody json.RawMessage, original, filtered []ChatMessage, cap TargetCapabilities) ([]byte, error) {
+func replayExpectedBody(req *ResponsesRequest, rawBody json.RawMessage, original, filtered []ChatMessage, cap TargetCapabilities, cfg FilterConfig) ([]byte, []string, error) {
 	if cap.WireAPI == WireAPIResponses {
-		return RewriteResponsesRequest(rawBody, original, filtered)
+		result, err := RewriteResponsesRequestWithConfig(rawBody, original, filtered, cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		return result.Body, mergeFilterNames(nil, result.FiltersRun), nil
 	}
 
 	chatReq, err := BuildChatRequest(req, filtered)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return json.Marshal(chatReq)
+	body, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, nil, nil
 }
 
 func assertJSONEqual(t *testing.T, got, want []byte) {

@@ -3,9 +3,17 @@ package neurorouter
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const instructionMessageSource = "instructions"
+
+type ResponsesRewriteResult struct {
+	Body        []byte
+	BytesBefore int
+	BytesAfter  int
+	FiltersRun  []string
+}
 
 // ExtractRequestMessages pulls the text-bearing messages that should run through
 // filtering/protection. Non-message Responses items stay in the original request
@@ -75,9 +83,21 @@ func BuildChatRequest(req *ResponsesRequest, msgs []ChatMessage) (*ChatRequest, 
 // RewriteResponsesRequest applies filtered text back onto the original Responses
 // request body without disturbing non-message items or unknown fields.
 func RewriteResponsesRequest(rawBody []byte, originalMsgs, processedMsgs []ChatMessage) ([]byte, error) {
+	result, err := RewriteResponsesRequestWithConfig(rawBody, originalMsgs, processedMsgs, FilterConfig{})
+	if err != nil {
+		return nil, err
+	}
+	return result.Body, nil
+}
+
+func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMsgs []ChatMessage, cfg FilterConfig) (*ResponsesRewriteResult, error) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &doc); err != nil {
 		return nil, fmt.Errorf("decode responses request: %w", err)
+	}
+	originalCanonical, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("marshal original responses request: %w", err)
 	}
 
 	originalSources := make(map[string]struct{}, len(originalMsgs))
@@ -106,7 +126,15 @@ func RewriteResponsesRequest(rawBody []byte, originalMsgs, processedMsgs []ChatM
 
 	rawInput, ok := doc["input"]
 	if !ok {
-		return json.Marshal(doc)
+		body, err := json.Marshal(doc)
+		if err != nil {
+			return nil, fmt.Errorf("marshal responses request without input: %w", err)
+		}
+		return &ResponsesRewriteResult{
+			Body:        body,
+			BytesBefore: len(originalCanonical),
+			BytesAfter:  len(body),
+		}, nil
 	}
 
 	var items []json.RawMessage
@@ -136,13 +164,28 @@ func RewriteResponsesRequest(rawBody []byte, originalMsgs, processedMsgs []ChatM
 		}
 	}
 
+	structuredFilters, err := cleanupStructuredResponsesItems(updated, cfg)
+	if err != nil {
+		return nil, err
+	}
+	updated = structuredFilters.Items
+
 	inputBytes, err := json.Marshal(updated)
 	if err != nil {
 		return nil, fmt.Errorf("marshal input items: %w", err)
 	}
 	doc["input"] = inputBytes
 
-	return json.Marshal(doc)
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("marshal rewritten responses request: %w", err)
+	}
+	return &ResponsesRewriteResult{
+		Body:        body,
+		BytesBefore: len(originalCanonical),
+		BytesAfter:  len(body),
+		FiltersRun:  structuredFilters.FiltersRun,
+	}, nil
 }
 
 func rewriteRawMessageItem(rawItem json.RawMessage, newText string) (json.RawMessage, bool, error) {
@@ -253,4 +296,230 @@ func marshalRawJSONString(value string) json.RawMessage {
 func marshalRawValue(value any) json.RawMessage {
 	data, _ := json.Marshal(value)
 	return data
+}
+
+type structuredCleanupResult struct {
+	Items      []json.RawMessage
+	FiltersRun []string
+}
+
+func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) (*structuredCleanupResult, error) {
+	out := append([]json.RawMessage(nil), items...)
+	var filters []string
+
+	if cfg.StaleReads {
+		next, changed, err := dropStructuredStaleReadItems(out)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		if changed {
+			filters = append(filters, "stale_reads")
+		}
+	}
+
+	if cfg.OrphanedResults {
+		next, changed, err := dropStructuredOrphanedOutputItems(out)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		if changed {
+			filters = append(filters, "orphaned_results")
+		}
+	}
+
+	return &structuredCleanupResult{Items: out, FiltersRun: filters}, nil
+}
+
+type structuredCallRecord struct {
+	Index  int
+	CallID string
+	Path   string
+}
+
+func dropStructuredStaleReadItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
+	reads := make(map[string][]structuredCallRecord)
+	writes := make(map[string]int)
+	outputsByCallID := make(map[string][]int)
+
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+
+		callID, _ := rawJSONStringValue(item["call_id"])
+		switch rawItemType(item) {
+		case "function_call":
+			name, _ := rawJSONStringValue(item["name"])
+			args, _ := rawJSONStringValue(item["arguments"])
+			path := extractStructuredPath(args)
+			switch {
+			case isStructuredReadToolName(name) && path != "" && callID != "":
+				reads[path] = append(reads[path], structuredCallRecord{Index: i, CallID: callID, Path: path})
+			case isStructuredWriteToolName(name) && path != "":
+				writes[path] = i
+			}
+		case "custom_tool_call":
+			name, _ := rawJSONStringValue(item["name"])
+			input, _ := rawJSONStringValue(item["input"])
+			path := extractStructuredPath(input)
+			switch {
+			case isStructuredReadToolName(name) && path != "" && callID != "":
+				reads[path] = append(reads[path], structuredCallRecord{Index: i, CallID: callID, Path: path})
+			case isStructuredWriteToolName(name) && path != "":
+				writes[path] = i
+			}
+		case "function_call_output", "custom_tool_call_output":
+			if callID != "" {
+				outputsByCallID[callID] = append(outputsByCallID[callID], i)
+			}
+		}
+	}
+
+	drop := make(map[int]bool)
+	for path, records := range reads {
+		if len(records) <= 1 {
+			continue
+		}
+		last := records[len(records)-1]
+		latestWrite, hasWrite := writes[path]
+		for _, record := range records[:len(records)-1] {
+			if hasWrite && latestWrite > record.Index && latestWrite < last.Index {
+				continue
+			}
+			drop[record.Index] = true
+			for _, outputIndex := range outputsByCallID[record.CallID] {
+				drop[outputIndex] = true
+			}
+		}
+	}
+
+	if len(drop) == 0 {
+		return items, false, nil
+	}
+	return filterRawResponsesItems(items, drop), true, nil
+}
+
+func dropStructuredOrphanedOutputItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
+	callIDs := make(map[string]bool)
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+		callID, _ := rawJSONStringValue(item["call_id"])
+		if callID == "" {
+			continue
+		}
+		switch rawItemType(item) {
+		case "function_call", "custom_tool_call", "local_shell_call", "tool_search_call":
+			callIDs[callID] = true
+		}
+	}
+
+	if len(callIDs) == 0 {
+		return items, false, nil
+	}
+
+	drop := make(map[int]bool)
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+		callID, _ := rawJSONStringValue(item["call_id"])
+		if callID == "" {
+			continue
+		}
+		switch rawItemType(item) {
+		case "function_call_output", "custom_tool_call_output", "tool_search_output":
+			if !callIDs[callID] {
+				drop[i] = true
+			}
+		}
+	}
+
+	if len(drop) == 0 {
+		return items, false, nil
+	}
+	return filterRawResponsesItems(items, drop), true, nil
+}
+
+func filterRawResponsesItems(items []json.RawMessage, drop map[int]bool) []json.RawMessage {
+	out := make([]json.RawMessage, 0, len(items)-len(drop))
+	for i, item := range items {
+		if drop[i] {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func decodeRawResponsesItem(rawItem json.RawMessage) (map[string]json.RawMessage, error) {
+	var item map[string]json.RawMessage
+	if err := json.Unmarshal(rawItem, &item); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func rawItemType(item map[string]json.RawMessage) string {
+	typ, _ := rawJSONStringValue(item["type"])
+	return typ
+}
+
+func extractStructuredPath(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return ""
+	}
+	path, _ := rawJSONStringValue(doc["file_path"])
+	if path != "" {
+		return path
+	}
+	path, _ = rawJSONStringValue(doc["path"])
+	return path
+}
+
+func isStructuredReadToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "read", "read_file", "readfile", "view":
+		return true
+	default:
+		return false
+	}
+}
+
+func isStructuredWriteToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "write", "edit", "write_file", "writefile", "notebookedit":
+		return true
+	default:
+		return false
+	}
+}
+
+func mergeFilterNames(base, extra []string) []string {
+	if len(extra) == 0 {
+		return append([]string(nil), base...)
+	}
+	out := append([]string(nil), base...)
+	seen := make(map[string]bool, len(out))
+	for _, name := range out {
+		seen[name] = true
+	}
+	for _, name := range extra {
+		if seen[name] {
+			continue
+		}
+		out = append(out, name)
+		seen[name] = true
+	}
+	return out
 }

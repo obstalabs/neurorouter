@@ -194,8 +194,11 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 	}
 	filteredMsgs := append([]ChatMessage(nil), requestMsgs...)
 	originalMsgs := append([]ChatMessage(nil), requestMsgs...)
+	useResponsesWire := selection.Capabilities.WireAPI == WireAPIResponses
 
 	var pipeResult *PipelineResult
+	var rawRewrite *ResponsesRewriteResult
+	var websocketRewrite *ResponsesRewriteResult
 	if runtime.pipeline != nil {
 		adapter := SelectFilterAdapter(selection.Capabilities, filteredMsgs)
 		var pipeErr error
@@ -217,6 +220,19 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 				runtime.dnd.RecordError()
 			}
 			return writeResponsesWebsocketError(conn, http.StatusForbidden, "invalid_request_error", "request blocked: "+pipeErr.Error())
+		}
+		if useResponsesWire {
+			rawRewrite, err = RewriteResponsesRequestWithConfig(rawBody, originalMsgs, filteredMsgs, runtime.pipeline.filters)
+			if err != nil {
+				return writeResponsesWebsocketError(conn, http.StatusInternalServerError, "server_error", "rewrite responses request: "+err.Error())
+			}
+			websocketRewrite, err = RewriteResponsesRequestWithConfig(payload, originalMsgs, filteredMsgs, runtime.pipeline.filters)
+			if err != nil {
+				return writeResponsesWebsocketError(conn, http.StatusInternalServerError, "server_error", "rewrite websocket request: "+err.Error())
+			}
+			pipeResult.BytesBefore = rawRewrite.BytesBefore
+			pipeResult.BytesAfter = rawRewrite.BytesAfter
+			pipeResult.FiltersRun = mergeFilterNames(pipeResult.FiltersRun, rawRewrite.FiltersRun)
 		}
 
 		if runtime.audit != nil {
@@ -243,21 +259,17 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 		}
 	}
 
-	if selection.Capabilities.WireAPI != WireAPIResponses {
+	if !useResponsesWire {
 		return writeResponsesWebsocketError(conn, http.StatusBadRequest, "invalid_request_error", "websocket mode requires a Responses-compatible upstream")
 	}
 
 	websocketBody := payload
 	body := rawBody
-	if pipeResult != nil {
-		body, err = RewriteResponsesRequest(rawBody, originalMsgs, filteredMsgs)
-		if err != nil {
-			return writeResponsesWebsocketError(conn, http.StatusInternalServerError, "server_error", "rewrite responses request: "+err.Error())
-		}
-		websocketBody, err = RewriteResponsesRequest(payload, originalMsgs, filteredMsgs)
-		if err != nil {
-			return writeResponsesWebsocketError(conn, http.StatusInternalServerError, "server_error", "rewrite websocket request: "+err.Error())
-		}
+	if rawRewrite != nil {
+		body = rawRewrite.Body
+	}
+	if websocketRewrite != nil {
+		websocketBody = websocketRewrite.Body
 	}
 
 	state.mu.Lock()

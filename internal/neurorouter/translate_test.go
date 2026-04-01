@@ -2,6 +2,7 @@ package neurorouter
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -199,6 +200,69 @@ func TestRewriteResponsesRequest_PreservesNonMessageItems(t *testing.T) {
 	}
 	if content[1].(map[string]any)["type"] != "input_image" {
 		t.Fatalf("non-text part lost: %+v", content[1])
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleReadsAndOrphanedOutputs(t *testing.T) {
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"function_call","call_id":"call_read_1","name":"Read","arguments":"{\"file_path\":\"/repo/README.md\"}"},
+			{"type":"function_call_output","call_id":"call_read_1","output":"stale output"},
+			{"type":"function_call_output","call_id":"call_missing","output":"orphaned output"},
+			{"type":"function_call","call_id":"call_read_2","name":"Read","arguments":"{\"file_path\":\"/repo/README.md\"}"},
+			{"type":"function_call_output","call_id":"call_read_2","output":"fresh output"},
+			{"type":"message","role":"user","content":"summarize the repo"}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "function_call"},
+			{Type: "function_call_output"},
+			{Type: "function_call_output"},
+			{Type: "function_call"},
+			{Type: "function_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"summarize the repo"`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		StaleReads:      true,
+		OrphanedResults: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "stale_reads,orphaned_results"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input length: got %d, want 3", len(input))
+	}
+	if input[0].(map[string]any)["call_id"] != "call_read_2" {
+		t.Fatalf("expected latest read to remain, got %+v", input[0])
+	}
+	if input[1].(map[string]any)["call_id"] != "call_read_2" {
+		t.Fatalf("expected latest read output to remain, got %+v", input[1])
+	}
+	if input[2].(map[string]any)["type"] != "message" {
+		t.Fatalf("user message should remain, got %+v", input[2])
 	}
 }
 

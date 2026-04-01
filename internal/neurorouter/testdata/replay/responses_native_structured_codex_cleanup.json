@@ -1,0 +1,77 @@
+{
+  "name": "responses_native_structured_codex_cleanup",
+  "description": "Drop stale structured read/output pairs and orphaned structured tool outputs on the native Responses path.",
+  "capabilities": {
+    "provider": "openai",
+    "wire_api": "responses",
+    "streaming": true,
+    "responses_items": true,
+    "reasoning_items": true
+  },
+  "filters": {
+    "stale_reads": true,
+    "orphaned_results": true
+  },
+  "request": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "function_call",
+        "call_id": "call_read_1",
+        "name": "Read",
+        "arguments": "{\"file_path\":\"/repo/README.md\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_read_1",
+        "output": "stale output"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_missing",
+        "output": "orphaned output"
+      },
+      {
+        "type": "function_call",
+        "call_id": "call_read_2",
+        "name": "Read",
+        "arguments": "{\"file_path\":\"/repo/README.md\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_read_2",
+        "output": "fresh output"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Summarize the repo."
+      }
+    ]
+  },
+  "expected_filters_run": [
+    "stale_reads",
+    "orphaned_results"
+  ],
+  "expected_body": {
+    "model": "gpt-5.4",
+    "input": [
+      {
+        "type": "function_call",
+        "call_id": "call_read_2",
+        "name": "Read",
+        "arguments": "{\"file_path\":\"/repo/README.md\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_read_2",
+        "output": "fresh output"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": "Summarize the repo."
+      }
+    ]
+  }
+}

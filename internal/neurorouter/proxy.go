@@ -436,9 +436,11 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	filteredMsgs := append([]ChatMessage(nil), requestMsgs...)
 	originalMsgs := append([]ChatMessage(nil), requestMsgs...)
+	useResponsesWire := selection.Capabilities.WireAPI == WireAPIResponses
 
 	// Pipeline: protect (secrets) → purify (noise).
 	var pipeResult *PipelineResult
+	var responsesRewrite *ResponsesRewriteResult
 	if runtime.pipeline != nil {
 		adapter := SelectFilterAdapter(selection.Capabilities, filteredMsgs)
 		var pipeErr error
@@ -465,6 +467,16 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		if pipeResult.SecretsFound > 0 && pipeResult.SecretPolicy == PolicyWarn {
 			w.Header().Set("X-Neurorouter-Secrets-Detected", fmt.Sprintf("%d", pipeResult.SecretsFound))
+		}
+		if useResponsesWire {
+			responsesRewrite, err = RewriteResponsesRequestWithConfig(rawBody, originalMsgs, filteredMsgs, runtime.pipeline.filters)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "rewrite responses request: "+err.Error())
+				return
+			}
+			pipeResult.BytesBefore = responsesRewrite.BytesBefore
+			pipeResult.BytesAfter = responsesRewrite.BytesAfter
+			pipeResult.FiltersRun = mergeFilterNames(pipeResult.FiltersRun, responsesRewrite.FiltersRun)
 		}
 		slog.Debug("pipeline",
 			"adapter", adapter.Name(),
@@ -521,16 +533,11 @@ func (p *Proxy) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	useResponsesWire := selection.Capabilities.WireAPI == WireAPIResponses
 	body := rawBody
 	upstreamPath := "/v1/responses"
 	if useResponsesWire {
-		if pipeResult != nil {
-			body, err = RewriteResponsesRequest(rawBody, originalMsgs, filteredMsgs)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "rewrite responses request: "+err.Error())
-				return
-			}
+		if responsesRewrite != nil {
+			body = responsesRewrite.Body
 		}
 	} else {
 		chatReq, err := BuildChatRequest(&req, filteredMsgs)
