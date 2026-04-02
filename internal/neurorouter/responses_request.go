@@ -14,6 +14,9 @@ const (
 	defaultStructuredReadOutputMax   = 16 * 1024
 	defaultStructuredSearchOutputMax = 8 * 1024
 	defaultStructuredSearchToolsKeep = 8
+	defaultStructuredToolsSchemaMax  = 12 * 1024
+	defaultToolDescriptionMax        = 512
+	defaultToolSchemaDescriptionMax  = 256
 )
 
 // codexCompactionSummaryPrefix mirrors Codex's SUMMARY_PREFIX template so we can
@@ -203,6 +206,21 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 		changed = true
 	}
 
+	var toolFilters []string
+	if cfg.OversizedBlocks {
+		if rawTools, ok := doc["tools"]; ok {
+			compactedTools, toolsChanged, err := compactStructuredOversizedToolDefinitions(rawTools, defaultStructuredToolsSchemaMax)
+			if err != nil {
+				return nil, fmt.Errorf("compact tools schema: %w", err)
+			}
+			if toolsChanged {
+				doc["tools"] = compactedTools
+				changed = true
+				toolFilters = append(toolFilters, "oversized_blocks")
+			}
+		}
+	}
+
 	if !changed {
 		return &ResponsesRewriteResult{
 			Body:        append([]byte(nil), rawBody...),
@@ -225,7 +243,7 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 		Body:        body,
 		BytesBefore: len(rawBody),
 		BytesAfter:  len(body),
-		FiltersRun:  structuredFilters.FiltersRun,
+		FiltersRun:  mergeFilterNames(structuredFilters.FiltersRun, toolFilters),
 	}, nil
 }
 
@@ -895,6 +913,39 @@ func compactStructuredOversizedSearchOutputItems(items []json.RawMessage, thresh
 	return out, true, nil
 }
 
+func compactStructuredOversizedToolDefinitions(rawTools json.RawMessage, threshold int) (json.RawMessage, bool, error) {
+	if threshold <= 0 || len(rawTools) <= threshold {
+		return rawTools, false, nil
+	}
+
+	var tools []any
+	if err := json.Unmarshal(rawTools, &tools); err != nil {
+		return rawTools, false, nil
+	}
+
+	changed := false
+	for i := range tools {
+		tool, toolChanged := compactStructuredToolDefinition(tools[i])
+		if !toolChanged {
+			continue
+		}
+		tools[i] = tool
+		changed = true
+	}
+	if !changed {
+		return rawTools, false, nil
+	}
+
+	out, err := json.Marshal(tools)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(out) >= len(rawTools) {
+		return rawTools, false, nil
+	}
+	return out, true, nil
+}
+
 func compactStructuredOversizedSearchOutputItem(rawItem json.RawMessage, threshold, maxTools int) (json.RawMessage, bool, error) {
 	if threshold <= 0 || maxTools <= 0 {
 		return rawItem, false, nil
@@ -935,6 +986,86 @@ func compactStructuredOversizedSearchOutputItem(rawItem json.RawMessage, thresho
 		return rawItem, false, nil
 	}
 	return out, true, nil
+}
+
+func compactStructuredToolDefinition(tool any) (any, bool) {
+	m, ok := tool.(map[string]any)
+	if !ok {
+		return tool, false
+	}
+
+	changed := compactToolMetadataObject(m, defaultToolDescriptionMax, defaultToolSchemaDescriptionMax)
+	if nested, ok := m["function"].(map[string]any); ok {
+		if compactToolMetadataObject(nested, defaultToolDescriptionMax, defaultToolSchemaDescriptionMax) {
+			m["function"] = nested
+			changed = true
+		}
+	}
+	return m, changed
+}
+
+func compactToolMetadataObject(obj map[string]any, descriptionMax, schemaDescriptionMax int) bool {
+	changed := false
+
+	if description, ok := obj["description"].(string); ok {
+		compacted := compactToolDescription(description, descriptionMax)
+		if compacted != description {
+			obj["description"] = compacted
+			changed = true
+		}
+	}
+
+	if schema, ok := obj["parameters"].(map[string]any); ok {
+		if compactStructuredToolSchema(schema, schemaDescriptionMax) {
+			obj["parameters"] = schema
+			changed = true
+		}
+	}
+
+	return changed
+}
+
+func compactStructuredToolSchema(node any, descriptionMax int) bool {
+	switch typed := node.(type) {
+	case []any:
+		changed := false
+		for i := range typed {
+			if compactStructuredToolSchema(typed[i], descriptionMax) {
+				changed = true
+			}
+		}
+		return changed
+	case map[string]any:
+		changed := false
+		for key, value := range typed {
+			switch key {
+			case "description":
+				description, ok := value.(string)
+				if !ok {
+					continue
+				}
+				compacted := compactToolDescription(description, descriptionMax)
+				if compacted != description {
+					typed[key] = compacted
+					changed = true
+				}
+				continue
+			case "title":
+				title, ok := value.(string)
+				if ok && strings.TrimSpace(title) != "" {
+					delete(typed, key)
+					changed = true
+				}
+				continue
+			}
+			if compactStructuredToolSchema(value, descriptionMax) {
+				changed = true
+			}
+		}
+		return changed
+	default:
+		return false
+	}
 }
 
 func truncateStructuredOversizedReadFunctionOutputItem(rawItem json.RawMessage, threshold int) (json.RawMessage, bool, error) {
@@ -1185,6 +1316,22 @@ func truncateReadStyleFunctionTranscript(output string, threshold int) (string, 
 		return "", false
 	}
 	return rewritten, true
+}
+
+func compactToolDescription(description string, max int) string {
+	normalized := strings.Join(strings.Fields(description), " ")
+	if max <= 0 || len(normalized) <= max {
+		return normalized
+	}
+	if max <= 3 {
+		return normalized[:max]
+	}
+
+	cut := max - 3
+	if boundary := strings.LastIndexByte(normalized[:cut], ' '); boundary > max/2 {
+		cut = boundary
+	}
+	return strings.TrimSpace(normalized[:cut]) + "..."
 }
 
 func parseReadStyleFunctionTranscript(output string) (string, string, string, bool) {

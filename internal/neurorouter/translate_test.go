@@ -7,6 +7,36 @@ import (
 	"testing"
 )
 
+func largeFunctionToolCatalog(count int) []map[string]any {
+	tools := make([]map[string]any, 0, count)
+	for i := 0; i < count; i++ {
+		tools = append(tools, map[string]any{
+			"type":        "function",
+			"name":        "tool_" + strconv.Itoa(i),
+			"description": strings.Repeat("This tool handles a long operational policy and safety guidance block. ", 32),
+			"parameters": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"mode", "target"},
+				"properties": map[string]any{
+					"mode": map[string]any{
+						"type":        "string",
+						"title":       "Mode",
+						"description": strings.Repeat("Select the execution mode for this tool call. ", 16),
+						"enum":        []string{"fast", "safe", "exact"},
+					},
+					"target": map[string]any{
+						"type":        "string",
+						"title":       "Target",
+						"description": strings.Repeat("Provide the primary target path or identifier for the tool call. ", 16),
+					},
+				},
+			},
+		})
+	}
+	return tools
+}
+
 func TestTranslateRequest_Basic(t *testing.T) {
 	req := &ResponsesRequest{
 		Model:           "deepseek-chat",
@@ -632,6 +662,140 @@ func TestRewriteResponsesRequestWithConfig_KeepsSmallSearchOutputs(t *testing.T)
 		},
 	}
 
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if len(result.FiltersRun) != 0 {
+		t.Fatalf("expected no compaction, got %v", result.FiltersRun)
+	}
+	if result.BytesBefore != result.BytesAfter {
+		t.Fatalf("expected no rewrite size change, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_CompactsOversizedTopLevelTools(t *testing.T) {
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"tools": largeFunctionToolCatalog(12),
+		"input": []map[string]any{
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "Summarize the docs findings.",
+			},
+		},
+	}
+	rawBody, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal raw body: %v", err)
+	}
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Summarize the docs findings."`)},
+		},
+	}
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	originalDescription := body["tools"].([]map[string]any)[0]["description"].(string)
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	tools := rewritten["tools"].([]any)
+	if got, want := len(tools), 12; got != want {
+		t.Fatalf("tools length: got %d, want %d", got, want)
+	}
+
+	firstTool := tools[0].(map[string]any)
+	if got, want := firstTool["name"], "tool_0"; got != want {
+		t.Fatalf("tool name: got %v, want %v", got, want)
+	}
+	description := firstTool["description"].(string)
+	if len(description) >= len(originalDescription) {
+		t.Fatalf("expected shorter tool description, got %d want < %d", len(description), len(originalDescription))
+	}
+
+	parameters := firstTool["parameters"].(map[string]any)
+	required := parameters["required"].([]any)
+	if got, want := len(required), 2; got != want {
+		t.Fatalf("required length: got %d, want %d", got, want)
+	}
+	properties := parameters["properties"].(map[string]any)
+	mode := properties["mode"].(map[string]any)
+	enumValues := mode["enum"].([]any)
+	if got, want := len(enumValues), 3; got != want {
+		t.Fatalf("enum length: got %d, want %d", got, want)
+	}
+	if _, ok := mode["title"]; ok {
+		t.Fatalf("expected schema title to be removed, got %+v", mode)
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_KeepsSmallTopLevelTools(t *testing.T) {
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"tools": []map[string]any{
+			{
+				"type":        "function",
+				"name":        "small_tool",
+				"description": "Short description.",
+				"parameters": map[string]any{
+					"type":     "object",
+					"required": []string{"target"},
+					"properties": map[string]any{
+						"target": map[string]any{
+							"type":        "string",
+							"description": "Short field description.",
+						},
+					},
+				},
+			},
+		},
+		"input": []map[string]any{
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "Summarize the docs findings.",
+			},
+		},
+	}
+	rawBody, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal raw body: %v", err)
+	}
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Summarize the docs findings."`)},
+		},
+	}
 	original, err := ExtractRequestMessages(req)
 	if err != nil {
 		t.Fatalf("extract original: %v", err)

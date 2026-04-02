@@ -2637,6 +2637,111 @@ func TestHandleResponses_NativeResponsesAuditsSearchOutputCompaction(t *testing.
 	}
 }
 
+func TestHandleResponses_NativeResponsesAuditsToolsSchemaCompaction(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-proof-tools-compaction","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			OversizedBlocks: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"tools": largeFunctionToolCatalog(12),
+		"input": []map[string]any{
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "Summarize the docs findings.",
+			},
+		},
+		"metadata": map[string]any{
+			"session_id": "codex-proof-tools-compaction",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	tools := captured["tools"].([]any)
+	if got, want := len(tools), 12; got != want {
+		t.Fatalf("tools length: got %d, want %d", got, want)
+	}
+	firstTool := tools[0].(map[string]any)
+	description := firstTool["description"].(string)
+	if len(description) >= len(strings.Repeat("This tool handles a long operational policy and safety guidance block. ", 32)) {
+		t.Fatalf("expected compacted tool description, got length %d", len(description))
+	}
+	parameters := firstTool["parameters"].(map[string]any)
+	required := parameters["required"].([]any)
+	if got, want := len(required), 2; got != want {
+		t.Fatalf("required length: got %d, want %d", got, want)
+	}
+	properties := parameters["properties"].(map[string]any)
+	mode := properties["mode"].(map[string]any)
+	if got, want := len(mode["enum"].([]any)), 3; got != want {
+		t.Fatalf("enum length: got %d, want %d", got, want)
+	}
+
+	audit := fetchAuditPayload(t, addr, "codex-proof-tools-compaction")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if entry.BytesRemoved < 20*1024 {
+		t.Fatalf("expected >20KB removed, got %d bytes", entry.BytesRemoved)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
 func TestHandleResponses_NativeResponsesAuditsShellTranscriptCleanup(t *testing.T) {
 	var captured map[string]any
 
