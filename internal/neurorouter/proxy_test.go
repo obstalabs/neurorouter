@@ -3223,6 +3223,132 @@ func TestHandleResponses_NativeResponsesAuditsReadStyleFunctionOutputShaping(t *
 	}
 }
 
+func TestHandleResponses_NativeResponsesAuditsHistoricalReadFunctionOutputBudget(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-proof-function-output-history-budget","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			OversizedBlocks: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	largeBody := strings.Repeat("  1737\tfunc TestSomething(t *testing.T) {}\n", 140)
+	input := make([]map[string]any, 0, 8)
+	originalOutputs := make([]string, 0, 7)
+	for i := 0; i < 7; i++ {
+		transcript := testReadStyleFunctionOutputTranscript(
+			fmt.Sprintf(`/bin/zsh -lc "nl -ba internal/neurorouter/file_%d.go | sed -n '1,200p'"`, i),
+			largeBody,
+		)
+		originalOutputs = append(originalOutputs, transcript)
+		input = append(input, map[string]any{
+			"type":    "function_call_output",
+			"call_id": fmt.Sprintf("call_read_%d", i),
+			"output":  transcript,
+		})
+	}
+	input = append(input, map[string]any{
+		"type":    "message",
+		"role":    "user",
+		"content": "Continue.",
+	})
+
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"input": input,
+		"metadata": map[string]any{
+			"session_id": "codex-proof-function-output-history-budget",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	rewritten := captured["input"].([]any)
+	if len(rewritten) != 8 {
+		t.Fatalf("input items: got %d, want 8", len(rewritten))
+	}
+
+	olderBodyBytes := 0
+	for i := 0; i < 7; i++ {
+		output := rewritten[i].(map[string]any)["output"].(string)
+		_, _, body, ok := parseReadStyleFunctionTranscript(output)
+		if !ok {
+			t.Fatalf("item %d lost transcript framing", i)
+		}
+		if i >= 4 && output != originalOutputs[i] {
+			t.Fatalf("recent transcript %d should remain intact", i)
+		}
+		if i < 4 {
+			olderBodyBytes += len(body)
+		}
+	}
+
+	if olderBodyBytes > defaultStructuredReadHistoryMax {
+		t.Fatalf("older read transcript budget exceeded: got %d, want <= %d", olderBodyBytes, defaultStructuredReadHistoryMax)
+	}
+	if output := rewritten[0].(map[string]any)["output"].(string); output == originalOutputs[0] {
+		t.Fatal("expected oldest transcript to shrink")
+	}
+
+	audit := fetchAuditPayload(t, addr, "codex-proof-function-output-history-budget")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if entry.BytesRemoved < 4*1024 {
+		t.Fatalf("expected >4KB removed, got %d bytes", entry.BytesRemoved)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
 func TestHandleResponses_UnknownModel(t *testing.T) {
 	p := NewProxy(ProxyConfig{
 		Listen:  ":0",

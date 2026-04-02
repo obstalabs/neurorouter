@@ -1231,6 +1231,93 @@ func TestRewriteResponsesRequestWithConfig_KeepsNonReadFunctionOutputs(t *testin
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_BudgetsOlderReadStyleFunctionOutputs(t *testing.T) {
+	largeBody := strings.Repeat("  1737\tfunc TestSomething(t *testing.T) {}\n", 140)
+	inputJSON := make([]string, 0, 8)
+	transcripts := make([]string, 0, 7)
+
+	for i := 0; i < 7; i++ {
+		transcript := testReadStyleFunctionOutputTranscript(
+			`/bin/zsh -lc "nl -ba internal/neurorouter/file_`+strconv.Itoa(i)+`.go | sed -n '1,200p'"`,
+			largeBody,
+		)
+		transcripts = append(transcripts, transcript)
+		inputJSON = append(inputJSON, `{"type":"function_call_output","call_id":"call_read_`+strconv.Itoa(i)+`","output":`+strconv.Quote(transcript)+`}`)
+	}
+	inputJSON = append(inputJSON, `{"type":"message","role":"user","content":"Continue."}`)
+
+	rawBody := []byte("{\n" +
+		`  "model":"gpt-5.4",` + "\n" +
+		`  "input":[` + strings.Join(inputJSON, ",") + "]\n" +
+		"}")
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "function_call_output"},
+			{Type: "function_call_output"},
+			{Type: "function_call_output"},
+			{Type: "function_call_output"},
+			{Type: "function_call_output"},
+			{Type: "function_call_output"},
+			{Type: "function_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 8 {
+		t.Fatalf("input length: got %d, want 8", len(input))
+	}
+
+	olderBodyBytes := 0
+	for i := 0; i < 7; i++ {
+		output := input[i].(map[string]any)["output"].(string)
+		_, _, body, ok := parseReadStyleFunctionTranscript(output)
+		if !ok {
+			t.Fatalf("item %d lost read-style transcript framing", i)
+		}
+		if i >= 4 && output != transcripts[i] {
+			t.Fatalf("recent transcript %d should remain intact", i)
+		}
+		if i < 4 {
+			olderBodyBytes += len(body)
+		}
+	}
+
+	if olderBodyBytes > defaultStructuredReadHistoryMax {
+		t.Fatalf("older read transcript budget exceeded: got %d, want <= %d", olderBodyBytes, defaultStructuredReadHistoryMax)
+	}
+	if output := input[0].(map[string]any)["output"].(string); output == transcripts[0] {
+		t.Fatal("expected oldest transcript to shrink")
+	}
+	if output := input[1].(map[string]any)["output"].(string); !strings.Contains(output, "[truncated by neurorouter") {
+		t.Fatalf("expected older transcript to include truncation marker: %q", output)
+	}
+}
+
 func TestTranslateRequest_FieldMapping(t *testing.T) {
 	temp := 0.7
 	topP := 0.9

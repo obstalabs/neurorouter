@@ -12,6 +12,8 @@ const (
 	structuredShellOutputHeadShare   = 1
 	structuredShellOutputShareTotal  = 3
 	defaultStructuredReadOutputMax   = 16 * 1024
+	defaultStructuredReadHistoryMax  = 16 * 1024
+	defaultStructuredReadKeepRecent  = 3
 	defaultStructuredSearchOutputMax = 8 * 1024
 	defaultStructuredSearchToolsKeep = 8
 	defaultStructuredToolsSchemaMax  = 12 * 1024
@@ -439,6 +441,13 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 	oversizedChanged := false
 	if cfg.OversizedBlocks {
 		next, changed, err := truncateStructuredOversizedReadFunctionOutputItems(out, defaultStructuredReadOutputMax)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		oversizedChanged = oversizedChanged || changed
+
+		next, changed, err = budgetStructuredHistoricalReadFunctionOutputItems(out, defaultStructuredReadHistoryMax, defaultStructuredReadKeepRecent)
 		if err != nil {
 			return nil, err
 		}
@@ -891,6 +900,107 @@ func truncateStructuredOversizedReadFunctionOutputItems(items []json.RawMessage,
 	return out, true, nil
 }
 
+type structuredReadOutputRecord struct {
+	Index        int
+	Output       string
+	Body         string
+	MinBodyBytes int
+}
+
+func budgetStructuredHistoricalReadFunctionOutputItems(items []json.RawMessage, threshold, keepRecent int) ([]json.RawMessage, bool, error) {
+	if threshold <= 0 {
+		return items, false, nil
+	}
+
+	var records []structuredReadOutputRecord
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+
+		switch rawItemType(item) {
+		case "function_call_output", "custom_tool_call_output":
+		default:
+			continue
+		}
+
+		output, err := rawJSONStringValue(item["output"])
+		if err != nil || output == "" {
+			continue
+		}
+
+		command, _, body, ok := parseReadStyleFunctionTranscript(output)
+		if !ok || !isReadStyleFunctionCommand(command) {
+			continue
+		}
+
+		_, minBodyBytes, changed := truncateReadStyleFunctionTranscriptToBodyBudget(output, 1)
+		if !changed {
+			minBodyBytes = len(body)
+		}
+
+		records = append(records, structuredReadOutputRecord{
+			Index:        i,
+			Output:       output,
+			Body:         body,
+			MinBodyBytes: minBodyBytes,
+		})
+	}
+
+	if len(records) <= keepRecent {
+		return items, false, nil
+	}
+
+	older := records[:len(records)-keepRecent]
+	totalOlderBytes := 0
+	for _, record := range older {
+		totalOlderBytes += len(record.Body)
+	}
+	if totalOlderBytes <= threshold {
+		return items, false, nil
+	}
+
+	out := append([]json.RawMessage(nil), items...)
+	changed := false
+	remainingBudget := threshold
+	for i := len(older) - 1; i >= 0; i-- {
+		record := older[i]
+		reserve := 0
+		for j := 0; j < i; j++ {
+			reserve += older[j].MinBodyBytes
+		}
+		allowed := remainingBudget - reserve
+		if allowed < record.MinBodyBytes {
+			allowed = record.MinBodyBytes
+		}
+		if len(record.Body) <= allowed {
+			remainingBudget -= len(record.Body)
+			continue
+		}
+
+		rewrittenOutput, rewrittenBodyBytes, itemChanged := truncateReadStyleFunctionTranscriptToBodyBudget(record.Output, allowed)
+		if !itemChanged {
+			remainingBudget -= len(record.Body)
+			continue
+		}
+
+		rewrittenItem, err := rewriteStructuredOutputItem(out[record.Index], rewrittenOutput)
+		if err != nil {
+			return nil, false, fmt.Errorf("rewrite read-style function output item %d: %w", record.Index, err)
+		}
+
+		out[record.Index] = rewrittenItem
+		remainingBudget -= rewrittenBodyBytes
+		changed = true
+	}
+
+	if !changed {
+		return items, false, nil
+	}
+	return out, true, nil
+}
+
 func compactStructuredOversizedSearchOutputItems(items []json.RawMessage, threshold, maxTools int) ([]json.RawMessage, bool, error) {
 	out := append([]json.RawMessage(nil), items...)
 	changed := false
@@ -1090,8 +1200,7 @@ func truncateStructuredOversizedReadFunctionOutputItem(rawItem json.RawMessage, 
 		return rawItem, false, nil
 	}
 
-	item["output"] = marshalRawJSONString(rewrittenOutput)
-	out, err := json.Marshal(item)
+	out, err := rewriteStructuredOutputItem(rawItem, rewrittenOutput)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1121,6 +1230,19 @@ func truncateStructuredOversizedShellOutputItem(rawItem json.RawMessage, thresho
 		return nil, false, err
 	}
 	return out, true, nil
+}
+
+func rewriteStructuredOutputItem(rawItem json.RawMessage, output string) (json.RawMessage, error) {
+	item, err := decodeRawResponsesItem(rawItem)
+	if err != nil {
+		return nil, err
+	}
+	item["output"] = marshalRawJSONString(output)
+	out, err := json.Marshal(item)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func dropStructuredDuplicateCompactionSummaries(items []json.RawMessage) ([]json.RawMessage, bool, error) {
@@ -1316,6 +1438,56 @@ func truncateReadStyleFunctionTranscript(output string, threshold int) (string, 
 		return "", false
 	}
 	return rewritten, true
+}
+
+func truncateReadStyleFunctionTranscriptToBodyBudget(output string, budget int) (string, int, bool) {
+	command, _, body, ok := parseReadStyleFunctionTranscript(output)
+	if !ok || !isReadStyleFunctionCommand(command) {
+		return "", 0, false
+	}
+	if len(body) <= budget {
+		return output, len(body), false
+	}
+
+	lowestOutput, changed := truncateReadStyleFunctionTranscript(output, 1)
+	if !changed {
+		return "", 0, false
+	}
+	_, _, lowestBody, ok := parseReadStyleFunctionTranscript(lowestOutput)
+	if !ok {
+		return "", 0, false
+	}
+	if budget <= len(lowestBody) {
+		return lowestOutput, len(lowestBody), true
+	}
+
+	low := 1
+	high := len(body) - 1
+	bestOutput := lowestOutput
+	bestBodyBytes := len(lowestBody)
+	for low <= high {
+		mid := (low + high) / 2
+		candidateOutput, candidateChanged := truncateReadStyleFunctionTranscript(output, mid)
+		if !candidateChanged {
+			high = mid - 1
+			continue
+		}
+
+		_, _, candidateBody, ok := parseReadStyleFunctionTranscript(candidateOutput)
+		if !ok {
+			return "", 0, false
+		}
+
+		if len(candidateBody) > budget {
+			high = mid - 1
+			continue
+		}
+
+		bestOutput = candidateOutput
+		bestBodyBytes = len(candidateBody)
+		low = mid + 1
+	}
+	return bestOutput, bestBodyBytes, true
 }
 
 func compactToolDescription(description string, max int) string {
