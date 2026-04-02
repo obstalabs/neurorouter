@@ -26,6 +26,12 @@ const DefaultListenAddress = "127.0.0.1:4000"
 const codexTurnStateHeader = "X-Codex-Turn-State"
 const codexTurnMetadataHeader = "X-Codex-Turn-Metadata"
 
+const (
+	auditSecretReportRedacted       = "redacted"
+	auditSecretReportFull           = "full"
+	auditDangerousSecretRevealQuery = "dangerously_reveal_secrets"
+)
+
 // Target describes an upstream API endpoint.
 type Target struct {
 	BaseURL string // e.g. "https://api.deepseek.com"
@@ -338,7 +344,18 @@ func (p *Proxy) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if entries == nil {
 		entries = []AuditEntry{}
 	}
-	if strings.ToLower(strings.TrimSpace(r.URL.Query().Get("secret_report"))) != "redacted" {
+
+	reportMode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("secret_report")))
+	switch reportMode {
+	case auditSecretReportRedacted:
+		// Keep redacted previews.
+	case auditSecretReportFull:
+		if !p.cfg.Protection.DangerouslyCaptureFullSecrets || !allowsDangerousSecretReveal(r) {
+			writeError(w, http.StatusBadRequest, "full secret diagnostics require proxy --dangerously-reveal-secrets and audit query dangerously_reveal_secrets=1")
+			return
+		}
+		entries = revealAuditSecretDiagnostics(entries)
+	default:
 		entries = stripAuditSecretDiagnostics(entries)
 	}
 	data, _ := json.Marshal(map[string]any{
@@ -359,6 +376,40 @@ func stripAuditSecretDiagnostics(entries []AuditEntry) []AuditEntry {
 		out[i].SecretDiagnostics = nil
 	}
 	return out
+}
+
+func revealAuditSecretDiagnostics(entries []AuditEntry) []AuditEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]AuditEntry, len(entries))
+	copy(out, entries)
+	for i := range out {
+		out[i].SecretDiagnostics = revealDetectedSecrets(out[i].SecretDiagnostics)
+	}
+	return out
+}
+
+func revealDetectedSecrets(secrets []DetectedSecret) []DetectedSecret {
+	if len(secrets) == 0 {
+		return nil
+	}
+	out := cloneDetectedSecrets(secrets)
+	for i := range out {
+		if out[i].FullValue != "" {
+			out[i].Value = out[i].FullValue
+		}
+	}
+	return out
+}
+
+func allowsDangerousSecretReveal(r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get(auditDangerousSecretRevealQuery))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *Proxy) handleDNDStatus(w http.ResponseWriter, r *http.Request) {

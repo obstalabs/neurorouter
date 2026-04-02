@@ -261,3 +261,23 @@ func TestScanMessages(t *testing.T) {
 		t.Errorf("expected 1 secret, got %d", len(result.Secrets))
 	}
 }
+
+func TestScannerWithCapture_StoresFullValueOnlyWhenEnabled(t *testing.T) {
+	secret := buildSecret("AKIA", "IOSFODNN7EXAMPL", "E")
+
+	plain := NewScanner().ScanContent("key=" + secret)
+	if len(plain.Secrets) != 1 {
+		t.Fatalf("plain scanner: expected 1 secret, got %d", len(plain.Secrets))
+	}
+	if plain.Secrets[0].FullValue != "" {
+		t.Fatalf("plain scanner should not retain full value, got %q", plain.Secrets[0].FullValue)
+	}
+
+	forensic := NewScannerWithCapture(true).ScanContent("key=" + secret)
+	if len(forensic.Secrets) != 1 {
+		t.Fatalf("forensic scanner: expected 1 secret, got %d", len(forensic.Secrets))
+	}
+	if forensic.Secrets[0].FullValue != secret {
+		t.Fatalf("forensic scanner full value: got %q, want %q", forensic.Secrets[0].FullValue, secret)
+	}
+}

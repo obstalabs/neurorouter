@@ -39,6 +39,9 @@ func TestProxyFlagDefaults(t *testing.T) {
 	if got := cmd.Flags().Lookup("secret-report").DefValue; got != "off" {
 		t.Fatalf("secret-report default: got %q, want off", got)
 	}
+	if got := cmd.Flags().Lookup("dangerously-reveal-secrets").DefValue; got != "false" {
+		t.Fatalf("dangerously-reveal-secrets default: got %q, want false", got)
+	}
 }
 
 func TestResolveProxySettings_Defaults(t *testing.T) {
@@ -63,6 +66,9 @@ func TestResolveProxySettings_Defaults(t *testing.T) {
 	}
 	if settings.SecretReport != secretReportOff {
 		t.Fatalf("secret report: got %q, want off", settings.SecretReport)
+	}
+	if settings.DangerousSecretReveal {
+		t.Fatal("dangerous secret reveal should be off by default")
 	}
 }
 
@@ -169,7 +175,24 @@ func TestResolveProxySettings_RejectsInvalidSecretReport(t *testing.T) {
 	mustSetFlag(t, cmd, "secret-report", "full")
 
 	if _, err := resolveProxySettings(cmd, neurorouter.DefaultConfig()); err == nil {
-		t.Fatal("expected invalid secret-report to fail")
+		t.Fatal("expected full secret-report without dangerous flag to fail")
+	}
+}
+
+func TestResolveProxySettings_AllowsFullSecretReportWithDangerousFlag(t *testing.T) {
+	cmd := newProxyTestCommand()
+	mustSetFlag(t, cmd, "secret-report", "full")
+	mustSetFlag(t, cmd, "dangerously-reveal-secrets", "true")
+
+	settings, err := resolveProxySettings(cmd, neurorouter.DefaultConfig())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if settings.SecretReport != secretReportFull {
+		t.Fatalf("secret report: got %q, want full", settings.SecretReport)
+	}
+	if !settings.DangerousSecretReveal {
+		t.Fatal("dangerous secret reveal should be enabled")
 	}
 }
 

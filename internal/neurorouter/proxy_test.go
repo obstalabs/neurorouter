@@ -3377,6 +3377,118 @@ func TestHandleAudit_SecretDiagnosticsRequireExplicitFlag(t *testing.T) {
 	}
 }
 
+func TestHandleAudit_FullSecretDiagnosticsRequireDangerousFlags(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-secret-audit","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	secret := buildSecret("AKIA", "IOSFODNN7EXAMPL", "E")
+	body := `{"model":"test-model","input":[{"type":"message","role":"user","content":"key=` + secret + `"}],"metadata":{"session_id":"secret-audit-full"}}`
+
+	t.Run("proxy not configured for dangerous reveal", func(t *testing.T) {
+		p := NewProxy(ProxyConfig{
+			Listen: ":0",
+			Targets: map[string]Target{
+				"default": {BaseURL: upstream.URL},
+			},
+			Protection: ProtectConfig{
+				Enabled: true,
+				Policy:  PolicyWarn,
+			},
+		})
+		addr, err := p.Start()
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		defer func() { _ = p.Stop() }()
+
+		resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+		}
+
+		auditResp, err := http.Get(localProxyURL(addr, "/v1/audit?session=secret-audit-full&secret_report=full&dangerously_reveal_secrets=1"))
+		if err != nil {
+			t.Fatalf("audit: %v", err)
+		}
+		defer func() { _ = auditResp.Body.Close() }()
+		if auditResp.StatusCode != http.StatusBadRequest {
+			b, _ := io.ReadAll(auditResp.Body)
+			t.Fatalf("status %d: %s", auditResp.StatusCode, string(b))
+		}
+	})
+
+	t.Run("double opt-in reveals full value", func(t *testing.T) {
+		p := NewProxy(ProxyConfig{
+			Listen: ":0",
+			Targets: map[string]Target{
+				"default": {BaseURL: upstream.URL},
+			},
+			Protection: ProtectConfig{
+				Enabled:                       true,
+				Policy:                        PolicyWarn,
+				DangerouslyCaptureFullSecrets: true,
+			},
+		})
+		addr, err := p.Start()
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		defer func() { _ = p.Stop() }()
+
+		resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+		}
+
+		missingFlagResp, err := http.Get(localProxyURL(addr, "/v1/audit?session=secret-audit-full&secret_report=full"))
+		if err != nil {
+			t.Fatalf("audit without dangerous query: %v", err)
+		}
+		defer func() { _ = missingFlagResp.Body.Close() }()
+		if missingFlagResp.StatusCode != http.StatusBadRequest {
+			b, _ := io.ReadAll(missingFlagResp.Body)
+			t.Fatalf("status %d: %s", missingFlagResp.StatusCode, string(b))
+		}
+
+		auditResp, err := http.Get(localProxyURL(addr, "/v1/audit?session=secret-audit-full&secret_report=full&dangerously_reveal_secrets=1"))
+		if err != nil {
+			t.Fatalf("audit: %v", err)
+		}
+		defer func() { _ = auditResp.Body.Close() }()
+		if auditResp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(auditResp.Body)
+			t.Fatalf("status %d: %s", auditResp.StatusCode, string(b))
+		}
+
+		var payload struct {
+			Count   int          `json:"count"`
+			Entries []AuditEntry `json:"entries"`
+		}
+		if err := json.NewDecoder(auditResp.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode audit: %v", err)
+		}
+		if len(payload.Entries) != 1 || len(payload.Entries[0].SecretDiagnostics) != 1 {
+			t.Fatalf("unexpected diagnostics payload: %+v", payload)
+		}
+		if got := payload.Entries[0].SecretDiagnostics[0].Value; got != secret {
+			t.Fatalf("full diagnostic value: got %q, want %q", got, secret)
+		}
+	})
+}
+
 func TestHandleResponses_NativeResponsesAuditsShellTranscriptCleanup(t *testing.T) {
 	var captured map[string]any
 

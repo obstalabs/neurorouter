@@ -35,7 +35,7 @@ type Pipeline struct {
 func NewPipeline(cfg PipelineConfig) *Pipeline {
 	var scanner *Scanner
 	if cfg.Protection.Enabled {
-		scanner = NewScanner()
+		scanner = NewScannerWithCapture(cfg.Protection.DangerouslyCaptureFullSecrets)
 	}
 
 	var nc *Neurocache

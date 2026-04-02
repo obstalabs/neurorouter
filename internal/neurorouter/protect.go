@@ -30,9 +30,10 @@ const (
 
 // DetectedSecret is a single secret found in message content.
 type DetectedSecret struct {
-	Type  SecretType `json:"type"`
-	Value string     `json:"preview"` // truncated preview (first 8 chars + "...")
-	Line  int        `json:"line"`    // 1-based line number
+	Type      SecretType `json:"type"`
+	Value     string     `json:"preview"` // truncated preview by default
+	FullValue string     `json:"-"`       // dangerous local-debug value, never serialized by default
+	Line      int        `json:"line"`    // 1-based line number
 }
 
 // ProtectResult summarizes a scan of messages.
@@ -52,8 +53,9 @@ const (
 
 // ProtectConfig configures secret detection.
 type ProtectConfig struct {
-	Enabled bool
-	Policy  SecretPolicy // default: "warn"
+	Enabled                       bool
+	Policy                        SecretPolicy // default: "warn"
+	DangerouslyCaptureFullSecrets bool
 }
 
 type secretRule struct {
@@ -63,12 +65,22 @@ type secretRule struct {
 
 // Scanner holds compiled detection rules.
 type Scanner struct {
-	rules []secretRule
+	rules             []secretRule
+	captureFullValues bool
 }
 
 // NewScanner creates a scanner with all detection rules compiled.
 func NewScanner() *Scanner {
-	return &Scanner{rules: defaultRules}
+	return NewScannerWithCapture(false)
+}
+
+// NewScannerWithCapture creates a scanner and optionally keeps full matched values
+// in memory for dangerous local debugging flows.
+func NewScannerWithCapture(captureFullValues bool) *Scanner {
+	return &Scanner{
+		rules:             defaultRules,
+		captureFullValues: captureFullValues,
+	}
 }
 
 var defaultRules = func() []secretRule {
@@ -146,11 +158,7 @@ func (s *Scanner) ScanContent(content string) *ProtectResult {
 		for _, match := range matches {
 			value := content[match[0]:match[1]]
 			line := countLines(content, match[0])
-			secrets = append(secrets, DetectedSecret{
-				Type:  rule.Type,
-				Value: truncateSecret(value),
-				Line:  line,
-			})
+			secrets = append(secrets, s.newDetectedSecret(rule.Type, value, line))
 		}
 	}
 
@@ -167,11 +175,7 @@ func (s *Scanner) ScanContent(content string) *ProtectResult {
 				}
 			}
 			if !alreadyCaught {
-				secrets = append(secrets, DetectedSecret{
-					Type:  SecretHighEntropy,
-					Value: truncateSecret(candidate),
-					Line:  countLines(content, match[0]),
-				})
+				secrets = append(secrets, s.newDetectedSecret(SecretHighEntropy, candidate, countLines(content, match[0])))
 			}
 		}
 	}
@@ -180,6 +184,18 @@ func (s *Scanner) ScanContent(content string) *ProtectResult {
 		Secrets:    secrets,
 		HasSecrets: len(secrets) > 0,
 	}
+}
+
+func (s *Scanner) newDetectedSecret(kind SecretType, value string, line int) DetectedSecret {
+	secret := DetectedSecret{
+		Type:  kind,
+		Value: truncateSecret(value),
+		Line:  line,
+	}
+	if s.captureFullValues {
+		secret.FullValue = value
+	}
+	return secret
 }
 
 // RedactMessages returns a copy of messages with secrets replaced by placeholders.

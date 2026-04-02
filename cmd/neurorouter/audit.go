@@ -22,7 +22,8 @@ func init() {
 	auditCmd.Flags().Int("last", 10, "number of entries to show")
 	auditCmd.Flags().Bool("json", false, "output as JSON")
 	auditCmd.Flags().String("session", "", "session identifier to inspect")
-	auditCmd.Flags().String("secret-report", secretReportOff, "secret diagnostics mode: off, redacted")
+	auditCmd.Flags().String("secret-report", secretReportOff, "secret diagnostics mode: off, redacted, full")
+	auditCmd.Flags().Bool("dangerously-reveal-secrets", false, "DANGER: required with --secret-report full; prints matched secrets in cleartext")
 }
 
 func runAudit(cmd *cobra.Command, _ []string) error {
@@ -31,13 +32,19 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	session, _ := cmd.Flags().GetString("session")
 	secretReportFlag, _ := cmd.Flags().GetString("secret-report")
+	dangerousReveal, _ := cmd.Flags().GetBool("dangerously-reveal-secrets")
 	out := cmd.OutOrStdout()
-	secretReport, err := normalizeSecretReportMode(secretReportFlag)
+	errOut := cmd.ErrOrStderr()
+	secretReport, err := normalizeSecretReportMode(secretReportFlag, dangerousReveal)
 	if err != nil {
 		return err
 	}
 
-	resp, err := http.Get(auditManagementURL(addr, session, secretReport))
+	if secretReport == secretReportFull {
+		printDangerousSecretRevealWarning(errOut)
+	}
+
+	resp, err := http.Get(auditManagementURL(addr, session, secretReport, dangerousReveal))
 	if err != nil {
 		return fmt.Errorf("connect to proxy at %s: %w", addr, err)
 	}
@@ -115,21 +122,27 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 			-savedPct, filters, secrets, blocked); err != nil {
 			return err
 		}
-		if secretReport == secretReportRedacted && len(e.SecretDiagnostics) > 0 {
-			printSecretDiagnostics(out, e.SecretDiagnostics)
+		if secretReport != secretReportOff && len(e.SecretDiagnostics) > 0 {
+			printSecretDiagnostics(out, e.SecretDiagnostics, secretReport)
 		}
 	}
 
 	return nil
 }
 
-func auditManagementURL(addr, session, secretReport string) string {
+func auditManagementURL(addr, session, secretReport string, dangerousReveal bool) string {
 	base := managementURL(addr, "/v1/audit", session)
-	if secretReport != secretReportRedacted {
+	if secretReport == secretReportOff {
 		return base
 	}
-	if strings.Contains(base, "?") {
-		return base + "&secret_report=" + secretReport
+
+	params := []string{"secret_report=" + secretReport}
+	if secretReport == secretReportFull && dangerousReveal {
+		params = append(params, "dangerously_reveal_secrets=1")
 	}
-	return base + "?secret_report=" + secretReport
+
+	if strings.Contains(base, "?") {
+		return base + "&" + strings.Join(params, "&")
+	}
+	return base + "?" + strings.Join(params, "&")
 }

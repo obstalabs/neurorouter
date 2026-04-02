@@ -46,6 +46,7 @@ type proxyRuntimeSettings struct {
 	Target                  string
 	APIKey                  string
 	SecretReport            string
+	DangerousSecretReveal   bool
 	ShellMaxBytes           int
 	InputPricePerMillionUSD float64
 	ClientAuth              bool
@@ -68,7 +69,8 @@ func addProxyFlags(cmd *cobra.Command) {
 	f.String("api-key", "", "API key (or env:VAR_NAME; auto-detected if omitted)")
 	f.Bool("client-auth", false, "forward client Authorization header instead of auto-configuring proxy auth")
 	f.String("protect-policy", "warn", "secret policy: block, redact, warn")
-	f.String("secret-report", secretReportOff, "secret diagnostics mode: off, redacted")
+	f.String("secret-report", secretReportOff, "secret diagnostics mode: off, redacted, full")
+	f.Bool("dangerously-reveal-secrets", false, "DANGER: allow storing and printing matched secret values in cleartext for local debugging")
 	f.Bool("no-protect", false, "disable secret detection")
 	f.Bool("no-filter", false, "disable content filters")
 	f.Int("shell-max-output-bytes", 0, "truncate native shell outputs above this many bytes (0 disables)")
@@ -106,6 +108,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	target := settings.Target
 	apiKey := settings.APIKey
 	secretReport := settings.SecretReport
+	dangerousSecretReveal := settings.DangerousSecretReveal
 	shellMaxBytes := settings.ShellMaxBytes
 	inputPricePerMillionUSD := settings.InputPricePerMillionUSD
 	clientAuth := settings.ClientAuth
@@ -160,8 +163,9 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 
 	if !noProtect {
 		cfg.Protection = neurorouter.ProtectConfig{
-			Enabled: true,
-			Policy:  neurorouter.SecretPolicy(protectPolicy),
+			Enabled:                       true,
+			Policy:                        neurorouter.SecretPolicy(protectPolicy),
+			DangerouslyCaptureFullSecrets: dangerousSecretReveal,
 		}
 	}
 
@@ -199,8 +203,8 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "[req] model=%s  bytes=%d→%d (%s)%s%s\n",
 			e.Model, e.BytesBefore, e.BytesAfter, formatRequestSummary(e.BytesBefore, e.BytesAfter, inputPricePerMillionUSD), filters, secrets+recurring)
-		if secretReport == secretReportRedacted && len(e.SecretDiagnostics) > 0 {
-			printSecretDiagnostics(os.Stderr, e.SecretDiagnostics)
+		if secretReport != secretReportOff && len(e.SecretDiagnostics) > 0 {
+			printSecretDiagnostics(os.Stderr, e.SecretDiagnostics, secretReport)
 		}
 
 		if firstRequest {
@@ -222,6 +226,9 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(os.Stderr, "neurorouter listening on %s\n", addr)
 	fmt.Fprintf(os.Stderr, "  target:  %s\n", startupTargetLabel(target, detected.TargetProvider))
 	fmt.Fprintf(os.Stderr, "  protect: %v (policy: %s)\n", !noProtect, protectPolicy)
+	if dangerousSecretReveal {
+		fmt.Fprintf(os.Stderr, "  DANGER: full matched secret values will be stored in memory for local debugging and can be revealed in cleartext\n")
+	}
 	fmt.Fprintf(os.Stderr, "  filter:  %v\n", !noFilter)
 	fmt.Fprintf(os.Stderr, "  cache:   %v\n", !noCache)
 	if len(availableAuthEnvKeys) > 0 {
@@ -450,6 +457,7 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 		InputPricePerMillionUSD: cfg.InputPricePerMillionUSD,
 		APIKey:                  flagString(cmd, "api-key"),
 		SecretReport:            flagString(cmd, "secret-report"),
+		DangerousSecretReveal:   flagBool(cmd, "dangerously-reveal-secrets"),
 		ShellMaxBytes:           flagInt(cmd, "shell-max-output-bytes"),
 		ClientAuth:              flagBool(cmd, "client-auth"),
 		PublicBind:              flagBool(cmd, "public"),
@@ -470,7 +478,7 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 	if cmd.Flags().Changed("protect-policy") {
 		settings.ProtectPolicy = flagString(cmd, "protect-policy")
 	}
-	secretReport, err := normalizeSecretReportMode(settings.SecretReport)
+	secretReport, err := normalizeSecretReportMode(settings.SecretReport, settings.DangerousSecretReveal)
 	if err != nil {
 		return proxyRuntimeSettings{}, err
 	}
