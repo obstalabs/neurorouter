@@ -2042,6 +2042,115 @@ func TestHandleResponses_NativeResponsesAuditsCompactionBoundaryHistoryBudget(t 
 	}
 }
 
+func TestHandleResponses_NativeResponsesAuditsReasoningHistoryBudget(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-proof-reasoning-history-budget","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			OversizedBlocks: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	input := make([]map[string]any, 0, 7)
+	for i := 0; i < 6; i++ {
+		input = append(input, map[string]any{
+			"type":              "reasoning",
+			"id":                fmt.Sprintf("rs_%d", i),
+			"content":           nil,
+			"encrypted_content": strings.Repeat("r", 5000),
+			"summary":           []any{},
+		})
+	}
+	input = append(input, map[string]any{
+		"type":    "message",
+		"role":    "user",
+		"content": "Continue.",
+	})
+
+	body := map[string]any{
+		"model":                "gpt-5.4",
+		"previous_response_id": "resp_prev_123",
+		"input":                input,
+		"metadata": map[string]any{
+			"session_id": "codex-proof-reasoning-history-budget",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	rewritten := captured["input"].([]any)
+	reasoningCount := 0
+	for _, item := range rewritten {
+		if item.(map[string]any)["type"] == "reasoning" {
+			reasoningCount++
+		}
+	}
+	if reasoningCount != defaultStructuredReasoningKeepRecent {
+		t.Fatalf("reasoning count: got %d, want %d", reasoningCount, defaultStructuredReasoningKeepRecent)
+	}
+	if rewritten[len(rewritten)-1].(map[string]any)["content"] != "Continue." {
+		t.Fatalf("expected trailing user message to remain, got %+v", rewritten[len(rewritten)-1])
+	}
+
+	audit := fetchAuditPayload(t, addr, "codex-proof-reasoning-history-budget")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if entry.BytesRemoved < 10*1024 {
+		t.Fatalf("expected >10KB removed, got %d bytes", entry.BytesRemoved)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
 func TestHandleResponses_NativeResponsesAuditsCodexWasteRemoval(t *testing.T) {
 	var captured map[string]any
 

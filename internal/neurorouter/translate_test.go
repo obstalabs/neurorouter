@@ -572,6 +572,165 @@ func TestRewriteResponsesRequestWithConfig_BudgetsCompactionBoundaryHistory(t *t
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_BudgetsHistoricalReasoningWithPreviousResponseID(t *testing.T) {
+	inputJSON := make([]string, 0, 7)
+	for i := 0; i < 6; i++ {
+		inputJSON = append(inputJSON, testReasoningInputJSON(strings.Repeat("r", 5000), i))
+	}
+	inputJSON = append(inputJSON, `{"type":"message","role":"user","content":"Continue."}`)
+
+	rawBody := []byte("{\n" +
+		`  "model":"gpt-5.4",` + "\n" +
+		`  "previous_response_id":"resp_prev_123",` + "\n" +
+		`  "input":[` + strings.Join(inputJSON, ",") + "]\n" +
+		"}")
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "reasoning"},
+			{Type: "reasoning"},
+			{Type: "reasoning"},
+			{Type: "reasoning"},
+			{Type: "reasoning"},
+			{Type: "reasoning"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	reasoningCount := 0
+	for _, item := range input {
+		if item.(map[string]any)["type"] == "reasoning" {
+			reasoningCount++
+		}
+	}
+	if reasoningCount != defaultStructuredReasoningKeepRecent {
+		t.Fatalf("reasoning count: got %d, want %d", reasoningCount, defaultStructuredReasoningKeepRecent)
+	}
+	if input[len(input)-1].(map[string]any)["content"] != "Continue." {
+		t.Fatalf("expected trailing user message to remain, got %+v", input[len(input)-1])
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_BudgetsHistoricalReasoningAfterCompaction(t *testing.T) {
+	rawBody := []byte("{\n" +
+		`  "model":"gpt-5.4",` + "\n" +
+		`  "input":[` +
+		testReasoningInputJSON(strings.Repeat("r", 5000), 0) + `,` +
+		testReasoningInputJSON(strings.Repeat("s", 5000), 1) + `,` +
+		`{"type":"compaction","encrypted_content":"opaque-current"},` +
+		testReasoningInputJSON(strings.Repeat("t", 5000), 2) + `,` +
+		`{"type":"message","role":"assistant","content":"Post-compaction delta."}` +
+		"]\n" +
+		"}")
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "reasoning"},
+			{Type: "reasoning"},
+			{Type: "compaction"},
+			{Type: "reasoning"},
+			{Type: "message", Role: "assistant", Content: json.RawMessage(`"Post-compaction delta."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	reasoningCount := 0
+	for _, item := range input {
+		if item.(map[string]any)["type"] == "reasoning" {
+			reasoningCount++
+		}
+	}
+	if reasoningCount != defaultStructuredReasoningKeepRecent {
+		t.Fatalf("reasoning count: got %d, want %d", reasoningCount, defaultStructuredReasoningKeepRecent)
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_KeepsReasoningWithoutContinuityGate(t *testing.T) {
+	inputJSON := make([]string, 0, 5)
+	for i := 0; i < 4; i++ {
+		inputJSON = append(inputJSON, testReasoningInputJSON(strings.Repeat("r", 5000), i))
+	}
+	inputJSON = append(inputJSON, `{"type":"message","role":"user","content":"Continue."}`)
+
+	rawBody := []byte("{\n" +
+		`  "model":"gpt-5.4",` + "\n" +
+		`  "input":[` + strings.Join(inputJSON, ",") + "]\n" +
+		"}")
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "reasoning"},
+			{Type: "reasoning"},
+			{Type: "reasoning"},
+			{Type: "reasoning"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if len(result.FiltersRun) != 0 {
+		t.Fatalf("expected no reasoning cleanup without continuity gate, got %v", result.FiltersRun)
+	}
+	if result.BytesBefore != result.BytesAfter {
+		t.Fatalf("expected no rewrite size change, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+}
+
 func TestRewriteResponsesRequestWithConfig_PreservesRawBodyWhenUnchanged(t *testing.T) {
 	rawBody := []byte("{\n  \"model\":\"gpt-5.4\",\n  \"input\":[{\"role\":\"user\",\"type\":\"message\",\"content\":\"hello\"},{\"type\":\"shell_call_output\",\"call_id\":\"call_123\",\"output\":\"stdout\",\"status\":\"completed\"}]\n}")
 
@@ -1490,6 +1649,10 @@ func testReadStyleFunctionOutputTranscript(command, body string) string {
 		"Process exited with code 0\n" +
 		"Original token count: 2048\n" +
 		"Output:\n" + body
+}
+
+func testReasoningInputJSON(payload string, i int) string {
+	return `{"type":"reasoning","id":"rs_` + strconv.Itoa(i) + `","content":null,"encrypted_content":` + strconv.Quote(payload) + `,"summary":[]}`
 }
 
 func TestTranslateResponse_Basic(t *testing.T) {

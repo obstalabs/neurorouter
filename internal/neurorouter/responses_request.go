@@ -13,6 +13,8 @@ const (
 	structuredShellOutputShareTotal       = 3
 	defaultStructuredCompactionHistoryMax = 4 * 1024
 	defaultStructuredCompactionKeepRecent = 1
+	defaultStructuredReasoningHistoryMax  = 4 * 1024
+	defaultStructuredReasoningKeepRecent  = 2
 	defaultStructuredReadOutputMax        = 16 * 1024
 	defaultStructuredReadHistoryMax       = 16 * 1024
 	defaultStructuredReadKeepRecent       = 3
@@ -201,7 +203,9 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 		}
 	}
 
-	structuredFilters, err := cleanupStructuredResponsesItems(updated, cfg)
+	structuredFilters, err := cleanupStructuredResponsesItems(updated, cfg, structuredCleanupOptions{
+		ReasoningBudget: shouldApplyStructuredReasoningBudget(doc, updated),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +370,11 @@ type structuredCleanupResult struct {
 	FiltersRun []string
 }
 
-func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) (*structuredCleanupResult, error) {
+type structuredCleanupOptions struct {
+	ReasoningBudget bool
+}
+
+func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig, opts structuredCleanupOptions) (*structuredCleanupResult, error) {
 	out := append([]json.RawMessage(nil), items...)
 	var filters []string
 
@@ -464,6 +472,13 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 		oversizedChanged = oversizedChanged || changed
 
 		next, changed, err = budgetStructuredCompactionBoundaryHistoryItems(out, defaultStructuredCompactionHistoryMax, defaultStructuredCompactionKeepRecent)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		oversizedChanged = oversizedChanged || changed
+
+		next, changed, err = budgetStructuredHistoricalReasoningItems(out, defaultStructuredReasoningHistoryMax, defaultStructuredReasoningKeepRecent, opts.ReasoningBudget)
 		if err != nil {
 			return nil, err
 		}
@@ -951,6 +966,11 @@ type structuredMessageBudgetRecord struct {
 	Preserve bool
 }
 
+type structuredReasoningRecord struct {
+	Index int
+	Size  int
+}
+
 func budgetStructuredHistoricalReadFunctionOutputItems(items []json.RawMessage, threshold, keepRecent int) ([]json.RawMessage, bool, error) {
 	if threshold <= 0 {
 		return items, false, nil
@@ -1097,6 +1117,56 @@ func budgetStructuredCompactionBoundaryHistoryItems(items []json.RawMessage, thr
 		}
 		if threshold > 0 && historyBytes+record.Size <= threshold {
 			historyBytes += record.Size
+			continue
+		}
+		drop[record.Index] = true
+	}
+
+	if len(drop) == 0 {
+		return items, false, nil
+	}
+	return filterRawResponsesItems(items, drop), true, nil
+}
+
+func budgetStructuredHistoricalReasoningItems(items []json.RawMessage, threshold, keepRecent int, enabled bool) ([]json.RawMessage, bool, error) {
+	if !enabled || threshold <= 0 {
+		return items, false, nil
+	}
+
+	records := make([]structuredReasoningRecord, 0, len(items))
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+		if rawItemType(item) != "reasoning" {
+			continue
+		}
+		records = append(records, structuredReasoningRecord{
+			Index: i,
+			Size:  len(rawItem),
+		})
+	}
+
+	if len(records) <= keepRecent {
+		return items, false, nil
+	}
+
+	older := records[:len(records)-keepRecent]
+	totalOlderBytes := 0
+	for _, record := range older {
+		totalOlderBytes += record.Size
+	}
+	if totalOlderBytes <= threshold {
+		return items, false, nil
+	}
+
+	drop := make(map[int]bool)
+	keptBytes := 0
+	for i := len(older) - 1; i >= 0; i-- {
+		record := older[i]
+		if keptBytes+record.Size <= threshold {
+			keptBytes += record.Size
 			continue
 		}
 		drop[record.Index] = true
@@ -1446,6 +1516,25 @@ func decodeRawResponsesItem(rawItem json.RawMessage) (map[string]json.RawMessage
 func rawItemType(item map[string]json.RawMessage) string {
 	typ, _ := rawJSONStringValue(item["type"])
 	return typ
+}
+
+func shouldApplyStructuredReasoningBudget(doc map[string]json.RawMessage, items []json.RawMessage) bool {
+	previousResponseID, _ := rawJSONStringValue(doc["previous_response_id"])
+	if strings.TrimSpace(previousResponseID) != "" {
+		return true
+	}
+
+	for _, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			continue
+		}
+		if rawItemType(item) == "compaction" {
+			return true
+		}
+	}
+
+	return false
 }
 
 func extractStructuredPath(raw string) string {
