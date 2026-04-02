@@ -1909,6 +1909,139 @@ func TestHandleResponses_NativeResponsesAuditsDuplicateCompactionSummaryCleanup(
 	}
 }
 
+func TestHandleResponses_NativeResponsesAuditsCompactionBoundaryHistoryBudget(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-proof-compaction-history-budget","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			OversizedBlocks: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	oldPrompt := strings.Repeat("audit prompt line\n", 5000)
+	oldAnswer := strings.Repeat("summary line\n", 5000)
+	lastPrompt := strings.Repeat("verify line\n", 400)
+	postCompact := "Post-compaction delta."
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"input": []map[string]any{
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": oldPrompt,
+			},
+			{
+				"type":    "message",
+				"role":    "assistant",
+				"content": oldAnswer,
+			},
+			{
+				"type":              "compaction",
+				"encrypted_content": "opaque-old",
+			},
+			{
+				"type":    "message",
+				"role":    "developer",
+				"content": "Preserve these repo guardrails.",
+			},
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": lastPrompt,
+			},
+			{
+				"type":              "compaction",
+				"encrypted_content": "opaque-current",
+			},
+			{
+				"type":    "message",
+				"role":    "assistant",
+				"content": postCompact,
+			},
+		},
+		"metadata": map[string]any{
+			"session_id": "codex-proof-compaction-history-budget",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	input := captured["input"].([]any)
+	if len(input) != 4 {
+		t.Fatalf("input items: got %d, want 4", len(input))
+	}
+	if got := input[0].(map[string]any)["role"]; got != "developer" {
+		t.Fatalf("expected developer message to remain, got %+v", input[0])
+	}
+	if got := input[1].(map[string]any)["content"]; got != lastPrompt {
+		t.Fatalf("expected latest pre-compaction prompt to remain, got %+v", input[1])
+	}
+	if got := input[2].(map[string]any)["encrypted_content"]; got != "opaque-current" {
+		t.Fatalf("expected latest compaction item to remain, got %+v", input[2])
+	}
+	if got := input[3].(map[string]any)["content"]; got != postCompact {
+		t.Fatalf("expected post-compaction delta to remain, got %+v", input[3])
+	}
+
+	audit := fetchAuditPayload(t, addr, "codex-proof-compaction-history-budget")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if entry.BytesRemoved < 100*1024 {
+		t.Fatalf("expected >100KB removed, got %d bytes", entry.BytesRemoved)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
 func TestHandleResponses_NativeResponsesAuditsCodexWasteRemoval(t *testing.T) {
 	var captured map[string]any
 

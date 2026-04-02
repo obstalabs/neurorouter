@@ -9,16 +9,18 @@ import (
 const instructionMessageSource = "instructions"
 
 const (
-	structuredShellOutputHeadShare   = 1
-	structuredShellOutputShareTotal  = 3
-	defaultStructuredReadOutputMax   = 16 * 1024
-	defaultStructuredReadHistoryMax  = 16 * 1024
-	defaultStructuredReadKeepRecent  = 3
-	defaultStructuredSearchOutputMax = 8 * 1024
-	defaultStructuredSearchToolsKeep = 8
-	defaultStructuredToolsSchemaMax  = 12 * 1024
-	defaultToolDescriptionMax        = 512
-	defaultToolSchemaDescriptionMax  = 256
+	structuredShellOutputHeadShare        = 1
+	structuredShellOutputShareTotal       = 3
+	defaultStructuredCompactionHistoryMax = 4 * 1024
+	defaultStructuredCompactionKeepRecent = 1
+	defaultStructuredReadOutputMax        = 16 * 1024
+	defaultStructuredReadHistoryMax       = 16 * 1024
+	defaultStructuredReadKeepRecent       = 3
+	defaultStructuredSearchOutputMax      = 8 * 1024
+	defaultStructuredSearchToolsKeep      = 8
+	defaultStructuredToolsSchemaMax       = 12 * 1024
+	defaultToolDescriptionMax             = 512
+	defaultToolSchemaDescriptionMax       = 256
 )
 
 // codexCompactionSummaryPrefix mirrors Codex's SUMMARY_PREFIX template so we can
@@ -455,6 +457,13 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 		oversizedChanged = oversizedChanged || changed
 
 		next, changed, err = budgetStructuredHistoricalReadFunctionOutputItems(out, defaultStructuredReadHistoryMax, defaultStructuredReadKeepRecent)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		oversizedChanged = oversizedChanged || changed
+
+		next, changed, err = budgetStructuredCompactionBoundaryHistoryItems(out, defaultStructuredCompactionHistoryMax, defaultStructuredCompactionKeepRecent)
 		if err != nil {
 			return nil, err
 		}
@@ -936,6 +945,12 @@ type structuredReadOutputRecord struct {
 	MinBodyBytes int
 }
 
+type structuredMessageBudgetRecord struct {
+	Index    int
+	Size     int
+	Preserve bool
+}
+
 func budgetStructuredHistoricalReadFunctionOutputItems(items []json.RawMessage, threshold, keepRecent int) ([]json.RawMessage, bool, error) {
 	if threshold <= 0 {
 		return items, false, nil
@@ -1028,6 +1043,69 @@ func budgetStructuredHistoricalReadFunctionOutputItems(items []json.RawMessage, 
 		return items, false, nil
 	}
 	return out, true, nil
+}
+
+func budgetStructuredCompactionBoundaryHistoryItems(items []json.RawMessage, threshold, keepRecent int) ([]json.RawMessage, bool, error) {
+	if len(items) == 0 {
+		return items, false, nil
+	}
+
+	latestCompaction := -1
+	messageRecords := make([]structuredMessageBudgetRecord, 0, len(items))
+	drop := make(map[int]bool)
+
+	for i, rawItem := range items {
+		item, err := decodeRawResponsesItem(rawItem)
+		if err != nil {
+			return nil, false, fmt.Errorf("decode structured item %d: %w", i, err)
+		}
+
+		switch rawItemType(item) {
+		case "compaction":
+			if latestCompaction >= 0 {
+				drop[latestCompaction] = true
+			}
+			latestCompaction = i
+		case "message":
+			role, _ := rawJSONStringValue(item["role"])
+			role = normalizeMessageRole(role)
+			messageRecords = append(messageRecords, structuredMessageBudgetRecord{
+				Index:    i,
+				Size:     len(rawItem),
+				Preserve: role == "system" || role == "developer",
+			})
+		}
+	}
+
+	if latestCompaction <= 0 {
+		return items, false, nil
+	}
+
+	historyBytes := 0
+	keptRecent := 0
+	for i := len(messageRecords) - 1; i >= 0; i-- {
+		record := messageRecords[i]
+		if record.Index > latestCompaction {
+			continue
+		}
+		if record.Preserve {
+			continue
+		}
+		if keptRecent < keepRecent {
+			keptRecent++
+			continue
+		}
+		if threshold > 0 && historyBytes+record.Size <= threshold {
+			historyBytes += record.Size
+			continue
+		}
+		drop[record.Index] = true
+	}
+
+	if len(drop) == 0 {
+		return items, false, nil
+	}
+	return filterRawResponsesItems(items, drop), true, nil
 }
 
 func compactStructuredOversizedSearchOutputItems(items []json.RawMessage, threshold, maxTools int) ([]json.RawMessage, bool, error) {

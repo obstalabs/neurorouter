@@ -501,6 +501,77 @@ func TestRewriteResponsesRequestWithConfig_KeepsDistinctCompactionSummaries(t *t
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_BudgetsCompactionBoundaryHistory(t *testing.T) {
+	oldPrompt := strings.Repeat("audit prompt line\n", 5000)
+	oldAnswer := strings.Repeat("summary line\n", 5000)
+	lastPrompt := strings.Repeat("verify line\n", 400)
+	postCompact := "Post-compaction delta."
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":` + strconv.Quote(oldPrompt) + `},
+			{"type":"message","role":"assistant","content":` + strconv.Quote(oldAnswer) + `},
+			{"type":"compaction","encrypted_content":"opaque-old"},
+			{"type":"message","role":"developer","content":"Preserve these repo guardrails."},
+			{"type":"message","role":"user","content":` + strconv.Quote(lastPrompt) + `},
+			{"type":"compaction","encrypted_content":"opaque-current"},
+			{"type":"message","role":"assistant","content":` + strconv.Quote(postCompact) + `}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "message", Role: "user", Content: json.RawMessage(strconv.Quote(oldPrompt))},
+			{Type: "message", Role: "assistant", Content: json.RawMessage(strconv.Quote(oldAnswer))},
+			{Type: "compaction"},
+			{Type: "message", Role: "developer", Content: json.RawMessage(`"Preserve these repo guardrails."`)},
+			{Type: "message", Role: "user", Content: json.RawMessage(strconv.Quote(lastPrompt))},
+			{Type: "compaction"},
+			{Type: "message", Role: "assistant", Content: json.RawMessage(strconv.Quote(postCompact))},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 4 {
+		t.Fatalf("input length: got %d, want 4", len(input))
+	}
+	if got := input[0].(map[string]any)["role"]; got != "developer" {
+		t.Fatalf("expected developer message to remain, got %+v", input[0])
+	}
+	if got := input[1].(map[string]any)["content"]; got != lastPrompt {
+		t.Fatalf("expected latest pre-compaction prompt to remain, got %+v", input[1])
+	}
+	if got := input[2].(map[string]any)["encrypted_content"]; got != "opaque-current" {
+		t.Fatalf("expected latest compaction item to remain, got %+v", input[2])
+	}
+	if got := input[3].(map[string]any)["content"]; got != postCompact {
+		t.Fatalf("expected post-compaction delta to remain, got %+v", input[3])
+	}
+}
+
 func TestRewriteResponsesRequestWithConfig_PreservesRawBodyWhenUnchanged(t *testing.T) {
 	rawBody := []byte("{\n  \"model\":\"gpt-5.4\",\n  \"input\":[{\"role\":\"user\",\"type\":\"message\",\"content\":\"hello\"},{\"type\":\"shell_call_output\",\"call_id\":\"call_123\",\"output\":\"stdout\",\"status\":\"completed\"}]\n}")
 
