@@ -157,7 +157,7 @@ func (s *Scanner) ScanContent(content string) *ProtectResult {
 	// High entropy detection.
 	for _, match := range highEntropyRe.FindAllStringIndex(content, -1) {
 		candidate := content[match[0]:match[1]]
-		if shannonEntropy(candidate) > 4.5 && hasMixedCharClasses(candidate) {
+		if isHighEntropySecretCandidate(candidate) {
 			// Skip if already caught by a specific rule.
 			alreadyCaught := false
 			for _, s := range secrets {
@@ -218,7 +218,7 @@ func (s *Scanner) redactContent(content string) string {
 
 	// High entropy.
 	content = highEntropyRe.ReplaceAllStringFunc(content, func(match string) string {
-		if shannonEntropy(match) > 4.5 && hasMixedCharClasses(match) {
+		if isHighEntropySecretCandidate(match) {
 			counters[SecretHighEntropy]++
 			return "<HIGH_ENTROPY_" + itoa(counters[SecretHighEntropy]) + ">"
 		}
@@ -296,4 +296,60 @@ func hasMixedCharClasses(s string) bool {
 		count++
 	}
 	return count >= 2
+}
+
+func isHighEntropySecretCandidate(s string) bool {
+	if shannonEntropy(s) <= 4.5 || !hasMixedCharClasses(s) {
+		return false
+	}
+	if looksLikePathLikeIdentifier(s) {
+		return false
+	}
+	return true
+}
+
+func looksLikePathLikeIdentifier(s string) bool {
+	if strings.Count(s, "/") < 2 {
+		return false
+	}
+
+	segments := 0
+	humanish := 0
+	for _, segment := range strings.Split(s, "/") {
+		if segment == "" {
+			continue
+		}
+		segments++
+		if isHumanishPathSegment(segment) {
+			humanish++
+		}
+	}
+
+	return segments >= 3 && humanish >= 2
+}
+
+func isHumanishPathSegment(s string) bool {
+	if len(s) == 0 || len(s) > 32 {
+		return false
+	}
+	if shannonEntropy(s) > 4.0 {
+		return false
+	}
+
+	hasLetter := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			hasLetter = true
+		case c >= 'a' && c <= 'z':
+			hasLetter = true
+		case c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.':
+		default:
+			return false
+		}
+	}
+
+	return hasLetter
 }

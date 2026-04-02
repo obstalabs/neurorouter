@@ -159,6 +159,35 @@ func TestScanner_NoFalsePositives(t *testing.T) {
 	}
 }
 
+func TestScanner_HighEntropyStillDetectsFallbackToken(t *testing.T) {
+	s := NewScanner()
+	token := buildSecret("A9kLm2PqRs4TuVw6XyZa8BcDe1FgHi3JkLmNo5PqRt7UvWx")
+
+	result := s.ScanContent("token=" + token)
+	if !result.HasSecrets {
+		t.Fatal("expected generic high-entropy detection")
+	}
+	if result.Secrets[0].Type != SecretHighEntropy {
+		t.Fatalf("expected %s, got %s", SecretHighEntropy, result.Secrets[0].Type)
+	}
+}
+
+func TestScanner_HighEntropyIgnoresPathLikeIdentifiers(t *testing.T) {
+	s := NewScanner()
+	safe := []string{
+		"/var/folders/64/2n4x5frs35z9_81mk9mqkb0r0000gn/T",
+		"/tmp/neurorouter-capture-smoke/019d4cc4_e9b7_7c51_8971_95a31ccd4f94",
+		"WORKLEDGER_HOST/api/v1/wo/neurorouter/94",
+	}
+
+	for _, content := range safe {
+		result := s.ScanContent(content)
+		if result.HasSecrets {
+			t.Fatalf("false positive on %q: detected %v", content, result.Secrets)
+		}
+	}
+}
+
 func TestScanner_RedactMessages(t *testing.T) {
 	s := NewScanner()
 	awsKey := buildSecret("AKIA", "IOSFODNN7EXAMPL", "E")
@@ -178,6 +207,20 @@ func TestScanner_RedactMessages(t *testing.T) {
 	}
 	if out[1].Content != "I see your key" {
 		t.Error("clean message should be unchanged")
+	}
+}
+
+func TestScanner_RedactMessages_PreservesPathLikeIdentifiers(t *testing.T) {
+	s := NewScanner()
+	path := "/tmp/neurorouter-capture-smoke/019d4cc4_e9b7_7c51_8971_95a31ccd4f94"
+	msgs := []ChatMessage{{Role: "user", Content: path}}
+
+	out, result := s.RedactMessages(msgs)
+	if result.HasSecrets {
+		t.Fatalf("expected no secrets, got %v", result.Secrets)
+	}
+	if out[0].Content != path {
+		t.Fatalf("expected path to remain unchanged, got %q", out[0].Content)
 	}
 }
 
