@@ -78,6 +78,7 @@ type Proxy struct {
 	pipeline *Pipeline               // default session runtime (kept for test helpers)
 	audit    *auditLog               // default session runtime (kept for test helpers)
 	dnd      *DND                    // default session runtime (kept for test helpers)
+	alerts   *AlertInjector          // default session runtime (kept for test helpers)
 	sessions *sessionRegistry        // session-scoped runtime state
 	wsBridge *responsesWebsocketRegistry
 }
@@ -103,6 +104,7 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 		pipeline: defaultRuntime.pipeline,
 		audit:    defaultRuntime.audit,
 		dnd:      defaultRuntime.dnd,
+		alerts:   defaultRuntime.alerts,
 		wsBridge: newResponsesWebsocketRegistry(),
 	}
 
@@ -451,6 +453,7 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 	// Pipeline: protect (secrets) → purify (noise).
 	var pipeResult *PipelineResult
 	var responsesRewrite *ResponsesRewriteResult
+	var alerts []Alert
 	if runtime.pipeline != nil {
 		adapter := SelectFilterAdapter(selection.Capabilities, filteredMsgs)
 		var pipeErr error
@@ -494,7 +497,11 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 			"bytes_before", pipeResult.BytesBefore,
 			"bytes_after", pipeResult.BytesAfter,
 			"filters", pipeResult.FiltersRun)
-		if suggestions := p.filteredSuggestions(runtime); len(suggestions) > 0 {
+		suggestions := p.filteredSuggestions(runtime)
+		if runtime.alerts != nil {
+			alerts = runtime.alerts.Generate(pipeResult, suggestions)
+		}
+		if len(suggestions) > 0 {
 			w.Header().Set("X-Neurorouter-Suggestions", fmt.Sprintf("%d", len(suggestions)))
 		}
 
@@ -634,17 +641,17 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 	if useResponsesWire {
 		propagateCodexTurnState(w.Header(), upResp.Header)
 		if req.Stream {
-			p.handlePassthroughStreamingResponse(w, upResp)
+			p.handlePassthroughStreamingResponse(w, upResp, alerts)
 		} else {
-			p.handlePassthroughResponse(w, upResp)
+			p.handlePassthroughResponse(w, upResp, alerts)
 		}
 		return
 	}
 
 	if req.Stream {
-		p.handleStreamingResponse(w, upResp)
+		p.handleStreamingResponse(w, upResp, alerts)
 	} else {
-		p.handleNonStreamingResponse(w, upResp)
+		p.handleNonStreamingResponse(w, upResp, alerts)
 	}
 }
 
@@ -670,12 +677,13 @@ func (p *Proxy) runtimeForSession(sessionKey string) *sessionRuntime {
 			pipeline: p.pipeline,
 			audit:    p.audit,
 			dnd:      p.dnd,
+			alerts:   p.alerts,
 		}
 	}
 	return p.sessions.runtime(sessionKey)
 }
 
-func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, upResp *http.Response) {
+func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, upResp *http.Response, alerts []Alert) {
 	var chatResp ChatCompletionResponse
 	if err := json.NewDecoder(upResp.Body).Decode(&chatResp); err != nil {
 		writeError(w, http.StatusBadGateway, "decode upstream response: "+err.Error())
@@ -683,11 +691,12 @@ func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, upResp *http.R
 	}
 
 	resp := TranslateResponse(&chatResp)
+	prependAlertsToResponsesAPIResponse(resp, alerts)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, upResp *http.Response) {
+func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, upResp *http.Response, alerts []Alert) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming not supported")
@@ -700,6 +709,7 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, upResp *http.Resp
 	w.WriteHeader(http.StatusOK)
 
 	translator := NewStreamTranslator()
+	alertState := newResponsesAlertStreamState(alerts)
 	scanner := bufio.NewScanner(upResp.Body)
 	// 256KB buffer for large chunks
 	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
@@ -722,6 +732,12 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, upResp *http.Resp
 
 		events, done := translator.TranslateChunk(&chunk)
 		for _, ev := range events {
+			if alertState != nil {
+				rewritten, err := rewriteResponsesEventPayload([]byte(ev.Data), ev.Event, alertState)
+				if err == nil {
+					ev.Data = string(rewritten)
+				}
+			}
 			_, _ = fmt.Fprint(w, ev.Format())
 		}
 		flusher.Flush()
@@ -732,17 +748,34 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, upResp *http.Resp
 	}
 }
 
-func (p *Proxy) handlePassthroughResponse(w http.ResponseWriter, upResp *http.Response) {
+func (p *Proxy) handlePassthroughResponse(w http.ResponseWriter, upResp *http.Response, alerts []Alert) {
 	if contentType := upResp.Header.Get("Content-Type"); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	} else {
 		w.Header().Set("Content-Type", "application/json")
 	}
 	w.WriteHeader(upResp.StatusCode)
-	_, _ = io.Copy(w, upResp.Body)
+
+	if len(alerts) == 0 {
+		_, _ = io.Copy(w, upResp.Body)
+		return
+	}
+
+	body, err := io.ReadAll(upResp.Body)
+	if err != nil {
+		slog.Debug("proxy: read native response for alert injection", "error", err)
+		return
+	}
+	rewritten, err := injectAlertsIntoResponsesBody(body, alerts)
+	if err != nil {
+		slog.Debug("proxy: inject alerts into native response", "error", err)
+		_, _ = w.Write(body)
+		return
+	}
+	_, _ = w.Write(rewritten)
 }
 
-func (p *Proxy) handlePassthroughStreamingResponse(w http.ResponseWriter, upResp *http.Response) {
+func (p *Proxy) handlePassthroughStreamingResponse(w http.ResponseWriter, upResp *http.Response, alerts []Alert) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming not supported")
@@ -767,19 +800,53 @@ func (p *Proxy) handlePassthroughStreamingResponse(w http.ResponseWriter, upResp
 
 	w.WriteHeader(upResp.StatusCode)
 
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := upResp.Body.Read(buf)
-		if n > 0 {
-			_, _ = w.Write(buf[:n])
+	if len(alerts) == 0 {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := upResp.Body.Read(buf)
+			if n > 0 {
+				_, _ = w.Write(buf[:n])
+				flusher.Flush()
+			}
+			if err != nil {
+				if err != io.EOF {
+					slog.Debug("proxy: native stream ended with error", "error", err)
+				}
+				break
+			}
+		}
+		return
+	}
+
+	alertState := newResponsesAlertStreamState(alerts)
+	scanner := bufio.NewScanner(upResp.Body)
+	scanner.Buffer(make([]byte, 0, 256*1024), 2*1024*1024)
+
+	currentEvent := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			currentEvent = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: "):
+			payload := strings.TrimPrefix(line, "data: ")
+			if payload != "" && payload != "[DONE]" {
+				rewritten, err := rewriteResponsesEventPayload([]byte(payload), currentEvent, alertState)
+				if err == nil {
+					line = "data: " + string(rewritten)
+				}
+			}
+		case line == "":
+			currentEvent = ""
+		}
+
+		_, _ = fmt.Fprint(w, line+"\n")
+		if line == "" {
 			flusher.Flush()
 		}
-		if err != nil {
-			if err != io.EOF {
-				slog.Debug("proxy: native stream ended with error", "error", err)
-			}
-			return
-		}
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Debug("proxy: native stream ended with error", "error", err)
 	}
 }
 

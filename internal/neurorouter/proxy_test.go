@@ -825,6 +825,157 @@ func TestHandleResponses_NativeResponsesStreamingPassthrough(t *testing.T) {
 	}
 }
 
+func TestHandleResponses_NativeResponsesNonStreamingInjectsAlerts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-native","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"native ok"}],"status":"completed"}]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			OversizedBlocks: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"tools": largeFunctionToolCatalog(12),
+		"input": []map[string]any{{
+			"type":    "message",
+			"role":    "user",
+			"content": "Summarize the docs findings.",
+		}},
+		"metadata": map[string]any{
+			"session_id": "codex-alert-native-http",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	output := payload["output"].([]any)
+	first := output[0].(map[string]any)
+	content := first["content"].([]any)
+	text := content[0].(map[string]any)["text"].(string)
+	if !strings.HasPrefix(text, "[NEUROROUTER] Removed") {
+		t.Fatalf("expected in-band alert prefix, got %q", text)
+	}
+	if !strings.Contains(text, "native ok") {
+		t.Fatalf("expected original text to remain, got %q", text)
+	}
+}
+
+func TestHandleResponses_NativeResponsesStreamingInjectsAlerts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-native\"}}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"native ok\"}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-native\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"native ok\"}],\"status\":\"completed\"}]}}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			OversizedBlocks: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := map[string]any{
+		"model":  "gpt-5.4",
+		"stream": true,
+		"tools":  largeFunctionToolCatalog(12),
+		"input": []map[string]any{{
+			"type":    "message",
+			"role":    "user",
+			"content": "Summarize the docs findings.",
+		}},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	events := string(data)
+	if !strings.Contains(events, "[NEUROROUTER] Removed") {
+		t.Fatalf("expected in-band alert in stream, got %s", events)
+	}
+	if !strings.Contains(events, "\"text\":\"[NEUROROUTER]") {
+		t.Fatalf("expected completed payload to carry alert text, got %s", events)
+	}
+}
+
 func TestHandleResponsesWebsocket_NativeResponsesStreamingPassthrough(t *testing.T) {
 	var captured map[string]any
 
@@ -930,6 +1081,96 @@ func TestHandleResponsesWebsocket_NativeResponsesStreamingPassthrough(t *testing
 	}
 	if !strings.Contains(events[2], `"type":"response.completed"`) {
 		t.Fatalf("missing completed event: %s", events[2])
+	}
+}
+
+func TestHandleResponsesWebsocket_NativeResponsesInjectsAlerts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.Error(w, "upgrade required", http.StatusUpgradeRequired)
+			return
+		}
+
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-native\"}}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"native ok\"}\n\n")
+		flusher.Flush()
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-native\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"native ok\"}],\"status\":\"completed\"}]}}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+		Filters: FilterConfig{
+			OversizedBlocks: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	wsURL := "ws://" + addr + "/responses"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	request := map[string]any{
+		"type":                "response.create",
+		"model":               "gpt-5.4",
+		"instructions":        "",
+		"input":               []map[string]any{{"type": "message", "role": "user", "content": "hi"}},
+		"tools":               largeFunctionToolCatalog(12),
+		"tool_choice":         "auto",
+		"parallel_tool_calls": true,
+		"stream":              true,
+		"store":               true,
+		"include":             []any{},
+	}
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, requestBytes); err != nil {
+		t.Fatalf("write websocket request: %v", err)
+	}
+
+	var events []string
+	for len(events) < 3 {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read websocket message: %v", err)
+		}
+		events = append(events, string(message))
+	}
+
+	if !strings.Contains(events[1], "[NEUROROUTER] Removed") {
+		t.Fatalf("expected alert in delta websocket event: %s", events[1])
+	}
+	if !strings.Contains(events[2], "[NEUROROUTER] Removed") {
+		t.Fatalf("expected alert in completed websocket event: %s", events[2])
 	}
 }
 

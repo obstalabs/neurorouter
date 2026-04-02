@@ -199,6 +199,7 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 	var pipeResult *PipelineResult
 	var rawRewrite *ResponsesRewriteResult
 	var websocketRewrite *ResponsesRewriteResult
+	var alerts []Alert
 	if runtime.pipeline != nil {
 		adapter := SelectFilterAdapter(selection.Capabilities, filteredMsgs)
 		var pipeErr error
@@ -233,6 +234,9 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 			pipeResult.BytesBefore = rawRewrite.BytesBefore
 			pipeResult.BytesAfter = rawRewrite.BytesAfter
 			pipeResult.FiltersRun = mergeFilterNames(pipeResult.FiltersRun, rawRewrite.FiltersRun)
+		}
+		if runtime.alerts != nil {
+			alerts = runtime.alerts.Generate(pipeResult, p.filteredSuggestions(runtime))
 		}
 
 		if runtime.audit != nil {
@@ -275,7 +279,7 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
-	if err := p.relayResponsesWebsocketUpstream(conn, r, state, selection, websocketBody); err == nil {
+	if err := p.relayResponsesWebsocketUpstream(conn, r, state, selection, websocketBody, alerts); err == nil {
 		return nil
 	} else if !errors.Is(err, errResponsesWebsocketFallback) {
 		return writeResponsesWebsocketError(conn, http.StatusBadGateway, "server_error", "upstream websocket error: "+err.Error())
@@ -337,7 +341,7 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 		return writeResponsesWebsocketError(conn, upResp.StatusCode, "upstream_error", decodeUpstreamErrorMessage(upResp.StatusCode, errorBody))
 	}
 
-	return relayResponsesSSEToWebsocket(conn, upResp.Body)
+	return relayResponsesSSEToWebsocket(conn, upResp.Body, alerts)
 }
 
 func sanitizeResponsesWebsocketRequest(payload []byte) ([]byte, http.Header, error) {
@@ -408,7 +412,7 @@ func extractResponsesWebsocketCompatibilityHeaders(raw json.RawMessage) (http.He
 
 var errResponsesWebsocketFallback = errors.New("fallback to http responses bridge")
 
-func (p *Proxy) relayResponsesWebsocketUpstream(clientConn *websocket.Conn, r *http.Request, state *responsesWebsocketBridgeState, selection targetSelection, payload []byte) error {
+func (p *Proxy) relayResponsesWebsocketUpstream(clientConn *websocket.Conn, r *http.Request, state *responsesWebsocketBridgeState, selection targetSelection, payload []byte, alerts []Alert) error {
 	upstreamConn, err := p.ensureResponsesWebsocketUpstream(r, state, selection)
 	if err != nil {
 		return errResponsesWebsocketFallback
@@ -419,6 +423,7 @@ func (p *Proxy) relayResponsesWebsocketUpstream(clientConn *websocket.Conn, r *h
 		return err
 	}
 
+	alertState := newResponsesAlertStreamState(alerts)
 	for {
 		msgType, message, err := upstreamConn.ReadMessage()
 		if err != nil {
@@ -428,11 +433,13 @@ func (p *Proxy) relayResponsesWebsocketUpstream(clientConn *websocket.Conn, r *h
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
 		}
+		eventType := responsesWebsocketEventType(message)
+		if rewritten, err := rewriteResponsesEventPayload(message, eventType, alertState); err == nil {
+			message = rewritten
+		}
 		if err := clientConn.WriteMessage(msgType, message); err != nil {
 			return err
 		}
-
-		eventType := responsesWebsocketEventType(message)
 		if eventType == "response.completed" || eventType == "error" {
 			return nil
 		}
@@ -532,20 +539,33 @@ func responsesWebsocketBetaHeaderPresent(headers http.Header) bool {
 	return false
 }
 
-func relayResponsesSSEToWebsocket(conn *websocket.Conn, body io.Reader) error {
+func relayResponsesSSEToWebsocket(conn *websocket.Conn, body io.Reader, alerts []Alert) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 256*1024), 2*1024*1024)
+	alertState := newResponsesAlertStreamState(alerts)
+	currentEvent := ""
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			currentEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
 		if !strings.HasPrefix(line, "data: ") {
+			if line == "" {
+				currentEvent = ""
+			}
 			continue
 		}
 		payload := strings.TrimPrefix(line, "data: ")
 		if payload == "" || payload == "[DONE]" {
 			continue
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
+		rewrittenPayload := []byte(payload)
+		if rewritten, err := rewriteResponsesEventPayload([]byte(payload), currentEvent, alertState); err == nil {
+			rewrittenPayload = rewritten
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, rewrittenPayload); err != nil {
 			return err
 		}
 	}

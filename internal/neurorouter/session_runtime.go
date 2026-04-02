@@ -16,6 +16,7 @@ type sessionRuntime struct {
 	pipeline *Pipeline
 	audit    *auditLog
 	dnd      *DND
+	alerts   *AlertInjector
 }
 
 type sessionRegistry struct {
@@ -25,14 +26,16 @@ type sessionRegistry struct {
 }
 
 func newSessionRuntime(cfg ProxyConfig) *sessionRuntime {
+	dnd := NewDND()
 	return &sessionRuntime{
 		pipeline: NewPipeline(PipelineConfig{
 			Filters:    cfg.Filters,
 			Protection: cfg.Protection,
 			Neurocache: cfg.Neurocache,
 		}),
-		audit: newAuditLog(100),
-		dnd:   NewDND(),
+		audit:  newAuditLog(100),
+		dnd:    dnd,
+		alerts: NewAlertInjector(VerbosityDefault, dnd),
 	}
 }
 
