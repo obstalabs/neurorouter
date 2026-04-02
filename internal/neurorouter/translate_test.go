@@ -1193,9 +1193,71 @@ func TestRewriteResponsesRequestWithConfig_TruncatesReadStyleFunctionOutputs(t *
 	}
 }
 
-func TestRewriteResponsesRequestWithConfig_KeepsNonReadFunctionOutputs(t *testing.T) {
+func TestRewriteResponsesRequestWithConfig_TruncatesOversizedNonReadFunctionOutputs(t *testing.T) {
 	largeBody := strings.Repeat("PASS\n", 6000)
 	transcript := testReadStyleFunctionOutputTranscript(`/bin/zsh -lc "go test ./..."`, largeBody)
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"function_call_output","call_id":"call_exec_1","output":` + strconv.Quote(transcript) + `},
+			{"type":"message","role":"user","content":"Continue."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "function_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		OversizedBlocks: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "oversized_blocks"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+	if result.BytesBefore <= result.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", result.BytesBefore, result.BytesAfter)
+	}
+
+	expectedOutput, changed := truncateNonReadFunctionTranscript(transcript, defaultStructuredReadOutputMax)
+	if !changed {
+		t.Fatal("expected non-read transcript to truncate")
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	output := input[0].(map[string]any)["output"].(string)
+	if output != expectedOutput {
+		t.Fatalf("unexpected truncated output:\n got: %q\nwant: %q", output, expectedOutput)
+	}
+	if !strings.Contains(output, "[truncated by neurorouter") {
+		t.Fatalf("missing truncation marker: %q", output)
+	}
+	if !strings.Contains(output, `Command: /bin/zsh -lc "go test ./..."`) {
+		t.Fatalf("missing command prefix: %q", output)
+	}
+	if !strings.Contains(output, "PASS") {
+		t.Fatalf("expected retained body context: %q", output)
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_KeepsSmallNonReadFunctionOutputs(t *testing.T) {
+	smallBody := strings.Repeat("PASS\n", 16)
+	transcript := testReadStyleFunctionOutputTranscript(`/bin/zsh -lc "go test ./..."`, smallBody)
 	rawBody := []byte(`{
 		"model":"gpt-5.4",
 		"input":[

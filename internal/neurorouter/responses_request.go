@@ -447,6 +447,13 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig) 
 		out = next
 		oversizedChanged = oversizedChanged || changed
 
+		next, changed, err = truncateStructuredOversizedNonReadFunctionOutputItems(out, defaultStructuredReadOutputMax)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+		oversizedChanged = oversizedChanged || changed
+
 		next, changed, err = budgetStructuredHistoricalReadFunctionOutputItems(out, defaultStructuredReadHistoryMax, defaultStructuredReadKeepRecent)
 		if err != nil {
 			return nil, err
@@ -900,6 +907,28 @@ func truncateStructuredOversizedReadFunctionOutputItems(items []json.RawMessage,
 	return out, true, nil
 }
 
+func truncateStructuredOversizedNonReadFunctionOutputItems(items []json.RawMessage, threshold int) ([]json.RawMessage, bool, error) {
+	out := append([]json.RawMessage(nil), items...)
+	changed := false
+
+	for i, rawItem := range items {
+		rewritten, itemChanged, err := truncateStructuredOversizedNonReadFunctionOutputItem(rawItem, threshold)
+		if err != nil {
+			return nil, false, fmt.Errorf("truncate non-read function output item %d: %w", i, err)
+		}
+		if !itemChanged {
+			continue
+		}
+		out[i] = rewritten
+		changed = true
+	}
+
+	if !changed {
+		return items, false, nil
+	}
+	return out, true, nil
+}
+
 type structuredReadOutputRecord struct {
 	Index        int
 	Output       string
@@ -1207,6 +1236,35 @@ func truncateStructuredOversizedReadFunctionOutputItem(rawItem json.RawMessage, 
 	return out, true, nil
 }
 
+func truncateStructuredOversizedNonReadFunctionOutputItem(rawItem json.RawMessage, threshold int) (json.RawMessage, bool, error) {
+	item, err := decodeRawResponsesItem(rawItem)
+	if err != nil {
+		return nil, false, err
+	}
+
+	switch rawItemType(item) {
+	case "function_call_output", "custom_tool_call_output":
+	default:
+		return rawItem, false, nil
+	}
+
+	output, err := rawJSONStringValue(item["output"])
+	if err != nil || output == "" {
+		return rawItem, false, nil
+	}
+
+	rewrittenOutput, changed := truncateNonReadFunctionTranscript(output, threshold)
+	if !changed {
+		return rawItem, false, nil
+	}
+
+	out, err := rewriteStructuredOutputItem(rawItem, rewrittenOutput)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
 func truncateStructuredOversizedShellOutputItem(rawItem json.RawMessage, threshold int) (json.RawMessage, bool, error) {
 	item, err := decodeRawResponsesItem(rawItem)
 	if err != nil {
@@ -1430,6 +1488,19 @@ func truncateStructuredShellOutput(output string, threshold int) string {
 func truncateReadStyleFunctionTranscript(output string, threshold int) (string, bool) {
 	command, prefix, body, ok := parseReadStyleFunctionTranscript(output)
 	if !ok || len(body) <= threshold || !isReadStyleFunctionCommand(command) {
+		return "", false
+	}
+
+	rewritten := prefix + truncateStructuredShellOutput(body, threshold)
+	if len(rewritten) >= len(output) {
+		return "", false
+	}
+	return rewritten, true
+}
+
+func truncateNonReadFunctionTranscript(output string, threshold int) (string, bool) {
+	command, prefix, body, ok := parseReadStyleFunctionTranscript(output)
+	if !ok || len(body) <= threshold || isReadStyleFunctionCommand(command) {
 		return "", false
 	}
 
