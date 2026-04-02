@@ -767,6 +767,79 @@ func TestHandleResponses_NativeResponsesNonStreamingPassthrough(t *testing.T) {
 	}
 }
 
+func TestHandleResponses_NativeResponsesNormalizesReplayedOutputTextHistory(t *testing.T) {
+	var captured map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-native","object":"response","status":"completed","output":[]}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"gpt-5.4": {BaseURL: upstream.URL},
+		},
+		Capabilities: map[string]TargetCapabilities{
+			"gpt-5.4": {
+				Model:          "gpt-5.4",
+				Provider:       "openai",
+				WireAPI:        WireAPIResponses,
+				Streaming:      true,
+				Tools:          true,
+				ToolResults:    true,
+				ResponsesItems: true,
+				ReasoningItems: true,
+			},
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := map[string]any{
+		"model": "gpt-5.4",
+		"input": []map[string]any{{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "output_text", "text": "[NEUROROUTER] Removed 413K tokens (~$1.24 saved)\n\nnative ok"},
+			},
+		}},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	input := captured["input"].([]any)
+	content := input[0].(map[string]any)["content"].([]any)
+	part := content[0].(map[string]any)
+	if part["type"] != "input_text" {
+		t.Fatalf("text part type: got %v, want input_text", part["type"])
+	}
+	if !strings.HasPrefix(part["text"].(string), "[NEUROROUTER] Removed 413K tokens") {
+		t.Fatalf("text part text: got %q", part["text"])
+	}
+}
+
 func TestHandleResponses_NativeResponsesStreamingPassthrough(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {

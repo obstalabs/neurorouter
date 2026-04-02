@@ -550,6 +550,14 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	if useResponsesWire && responsesRewrite == nil {
+		responsesRewrite, err = RewriteResponsesRequestWithConfig(rawBody, originalMsgs, filteredMsgs, FilterConfig{})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "rewrite responses request: "+err.Error())
+			return
+		}
+	}
+
 	// Dry-run mode: return diff without forwarding upstream.
 	if p.cfg.DryRun {
 		result := DryRunResult{

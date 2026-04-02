@@ -184,7 +184,14 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 		original := originalBySource[source]
 		if msg, ok := processedBySource[source]; ok {
 			if msg.Content == original.Content {
-				updated = append(updated, rawItem)
+				normalized, normalizedChanged, err := normalizeRawInputMessageItem(rawItem)
+				if err != nil {
+					return nil, fmt.Errorf("normalize input item %d: %w", i, err)
+				}
+				if normalizedChanged {
+					changed = true
+				}
+				updated = append(updated, normalized)
 				continue
 			}
 		}
@@ -255,6 +262,53 @@ func RewriteResponsesRequestWithConfig(rawBody []byte, originalMsgs, processedMs
 	}, nil
 }
 
+func normalizeRawInputMessageItem(rawItem json.RawMessage) (json.RawMessage, bool, error) {
+	var item map[string]json.RawMessage
+	if err := json.Unmarshal(rawItem, &item); err != nil {
+		return nil, false, fmt.Errorf("decode raw item: %w", err)
+	}
+
+	contentRaw, ok := item["content"]
+	if !ok || len(contentRaw) == 0 {
+		return rawItem, false, nil
+	}
+
+	var text string
+	if err := json.Unmarshal(contentRaw, &text); err == nil {
+		return rawItem, false, nil
+	}
+
+	var parts []map[string]json.RawMessage
+	if err := json.Unmarshal(contentRaw, &parts); err != nil {
+		return nil, false, fmt.Errorf("decode content parts: %w", err)
+	}
+
+	normalized := false
+	for _, part := range parts {
+		partType, err := rawJSONStringValue(part["type"])
+		if err != nil {
+			return nil, false, fmt.Errorf("decode content part type: %w", err)
+		}
+		if !requiresInputTextNormalization(partType) {
+			continue
+		}
+		part["type"] = marshalRawJSONString("input_text")
+		normalized = true
+	}
+
+	if !normalized {
+		return rawItem, false, nil
+	}
+
+	item["content"] = marshalRawValue(parts)
+
+	out, err := json.Marshal(item)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal normalized item: %w", err)
+	}
+	return out, true, nil
+}
+
 func rewriteRawMessageItem(rawItem json.RawMessage, newText string) (json.RawMessage, bool, error) {
 	var item map[string]json.RawMessage
 	if err := json.Unmarshal(rawItem, &item); err != nil {
@@ -296,6 +350,7 @@ func rewriteRawMessageItem(rawItem json.RawMessage, newText string) (json.RawMes
 			if newText == "" || wroteText {
 				continue
 			}
+			part["type"] = marshalRawJSONString("input_text")
 			part["text"] = marshalRawJSONString(newText)
 			outParts = append(outParts, part)
 			wroteText = true
@@ -334,6 +389,15 @@ func normalizeMessageRole(role string) string {
 
 func responseInputSource(index int) string {
 	return fmt.Sprintf("input:%d", index)
+}
+
+func requiresInputTextNormalization(partType string) bool {
+	switch partType {
+	case "text", "output_text":
+		return true
+	default:
+		return false
+	}
 }
 
 func isTextContentType(partType string) bool {

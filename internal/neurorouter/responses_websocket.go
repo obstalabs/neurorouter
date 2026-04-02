@@ -270,6 +270,17 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 		return writeResponsesWebsocketError(conn, http.StatusBadRequest, "invalid_request_error", "websocket mode requires a Responses-compatible upstream")
 	}
 
+	if rawRewrite == nil {
+		rawRewrite, err = RewriteResponsesRequestWithConfig(rawBody, originalMsgs, filteredMsgs, FilterConfig{})
+		if err != nil {
+			return writeResponsesWebsocketError(conn, http.StatusInternalServerError, "server_error", "rewrite responses request: "+err.Error())
+		}
+		websocketRewrite, err = RewriteResponsesRequestWithConfig(payload, originalMsgs, filteredMsgs, FilterConfig{})
+		if err != nil {
+			return writeResponsesWebsocketError(conn, http.StatusInternalServerError, "server_error", "rewrite websocket request: "+err.Error())
+		}
+	}
+
 	websocketBody := payload
 	body := rawBody
 	if rawRewrite != nil {

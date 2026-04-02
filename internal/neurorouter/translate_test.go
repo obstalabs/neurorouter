@@ -763,6 +763,68 @@ func TestRewriteResponsesRequestWithConfig_PreservesRawBodyWhenUnchanged(t *test
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_NormalizesRequestTextPartTypesWhenUnchanged(t *testing.T) {
+	templateBody := `{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":[
+				{"type":"PART_TYPE","text":"hello"},
+				{"type":"input_image","image_url":"file://image.png"}
+			]}
+		]
+	}`
+	templateContent := `[{"type":"PART_TYPE","text":"hello"},{"type":"input_image","image_url":"file://image.png"}]`
+
+	for _, partType := range []string{"text", "output_text"} {
+		t.Run(partType, func(t *testing.T) {
+			rawBody := []byte(strings.ReplaceAll(templateBody, "PART_TYPE", partType))
+			content := strings.ReplaceAll(templateContent, "PART_TYPE", partType)
+
+			req := &ResponsesRequest{
+				Model: "gpt-5.4",
+				Input: []InputItem{
+					{Type: "message", Role: "user", Content: json.RawMessage(content)},
+				},
+			}
+
+			original, err := ExtractRequestMessages(req)
+			if err != nil {
+				t.Fatalf("extract original: %v", err)
+			}
+
+			result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{})
+			if err != nil {
+				t.Fatalf("rewrite: %v", err)
+			}
+
+			if string(result.Body) == string(rawBody) {
+				t.Fatal("expected rewritten body to normalize text part type")
+			}
+			if got := strings.Join(result.FiltersRun, ","); got != "" {
+				t.Fatalf("filters run: got %q, want none", got)
+			}
+
+			var rewritten map[string]any
+			if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+				t.Fatalf("decode rewritten: %v", err)
+			}
+
+			input := rewritten["input"].([]any)
+			contentParts := input[0].(map[string]any)["content"].([]any)
+			first := contentParts[0].(map[string]any)
+			if first["type"] != "input_text" {
+				t.Fatalf("text part type: got %v, want input_text", first["type"])
+			}
+			if first["text"] != "hello" {
+				t.Fatalf("text part text: got %v, want hello", first["text"])
+			}
+			if contentParts[1].(map[string]any)["type"] != "input_image" {
+				t.Fatalf("non-text part changed: %+v", contentParts[1])
+			}
+		})
+	}
+}
+
 func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleSearchChains(t *testing.T) {
 	rawBody := []byte(`{
 		"model":"gpt-5.4",
