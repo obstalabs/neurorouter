@@ -33,6 +33,9 @@ func TestProxyFlagDefaults(t *testing.T) {
 	if got := cmd.Flags().Lookup("shell-max-output-bytes").DefValue; got != "0" {
 		t.Fatalf("shell-max-output-bytes default: got %q, want 0", got)
 	}
+	if got := cmd.Flags().Lookup("input-price-per-million-usd").DefValue; got != "3" {
+		t.Fatalf("input-price-per-million-usd default: got %q, want 3", got)
+	}
 	if got := cmd.Flags().Lookup("secret-report").DefValue; got != "off" {
 		t.Fatalf("secret-report default: got %q, want off", got)
 	}
@@ -55,6 +58,9 @@ func TestResolveProxySettings_Defaults(t *testing.T) {
 	if settings.ShellMaxBytes != 0 {
 		t.Fatalf("shell max bytes: got %d, want 0", settings.ShellMaxBytes)
 	}
+	if settings.InputPricePerMillionUSD != neurorouter.DefaultInputPricePerMillionUSD {
+		t.Fatalf("input price: got %.1f, want %.1f", settings.InputPricePerMillionUSD, neurorouter.DefaultInputPricePerMillionUSD)
+	}
 	if settings.SecretReport != secretReportOff {
 		t.Fatalf("secret report: got %q, want off", settings.SecretReport)
 	}
@@ -65,6 +71,7 @@ func TestResolveProxySettings_ConfigValues(t *testing.T) {
 	cfg.ListenPort = 5005
 	cfg.Upstream = "https://config.example"
 	cfg.ProtectPolicy = "block"
+	cfg.InputPricePerMillionUSD = 4.25
 
 	settings, err := resolveProxySettings(newProxyTestCommand(), cfg)
 	if err != nil {
@@ -78,6 +85,9 @@ func TestResolveProxySettings_ConfigValues(t *testing.T) {
 	}
 	if settings.ProtectPolicy != "block" {
 		t.Fatalf("protect policy: got %q", settings.ProtectPolicy)
+	}
+	if settings.InputPricePerMillionUSD != 4.25 {
+		t.Fatalf("input price: got %.2f", settings.InputPricePerMillionUSD)
 	}
 }
 
@@ -128,6 +138,7 @@ func TestResolveProxySettings_FlagsOverrideLoadedConfig(t *testing.T) {
 	mustSetFlag(t, cmd, "protect-policy", "warn")
 	mustSetFlag(t, cmd, "secret-report", "redacted")
 	mustSetFlag(t, cmd, "shell-max-output-bytes", "32768")
+	mustSetFlag(t, cmd, "input-price-per-million-usd", "5.5")
 
 	settings, err := resolveProxySettings(cmd, cfg)
 	if err != nil {
@@ -144,6 +155,9 @@ func TestResolveProxySettings_FlagsOverrideLoadedConfig(t *testing.T) {
 	}
 	if settings.ShellMaxBytes != 32768 {
 		t.Fatalf("shell max bytes: got %d, want 32768", settings.ShellMaxBytes)
+	}
+	if settings.InputPricePerMillionUSD != 5.5 {
+		t.Fatalf("input price: got %.1f, want 5.5", settings.InputPricePerMillionUSD)
 	}
 	if settings.SecretReport != secretReportRedacted {
 		t.Fatalf("secret report: got %q, want redacted", settings.SecretReport)
@@ -273,6 +287,38 @@ func TestFormatRequestDelta(t *testing.T) {
 			t.Fatalf("format delta: got %q, want %q", got, want)
 		}
 	})
+}
+
+func TestFormatRequestSummary(t *testing.T) {
+	t.Run("adds tokens and usd for savings", func(t *testing.T) {
+		got := formatRequestSummary(72628, 64030, 3.0)
+		want := "-8598 bytes, 11% saved; 2149 tokens; $0.0064"
+		if got != want {
+			t.Fatalf("format summary: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("keeps growth concise", func(t *testing.T) {
+		got := formatRequestSummary(41653, 41655, 3.0)
+		want := "+2 bytes"
+		if got != want {
+			t.Fatalf("format summary: got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestTrackRecurringFingerprint(t *testing.T) {
+	counts := make(map[string]int)
+
+	if got := trackRecurringFingerprint(counts, 72628, 64030, []string{"oversized_blocks"}); got != "" {
+		t.Fatalf("first occurrence: got %q, want empty", got)
+	}
+
+	got := trackRecurringFingerprint(counts, 72628, 64030, []string{"oversized_blocks"})
+	want := "fixed-delta oversized_blocks/8598B x2"
+	if got != want {
+		t.Fatalf("second occurrence: got %q, want %q", got, want)
+	}
 }
 
 func TestAutoDetectProviderSettings(t *testing.T) {

@@ -78,8 +78,8 @@ func (pt *ProgressTracker) Report() ProgressReport {
 	defer pt.mu.Unlock()
 
 	bytesSaved := pt.totalBytesBefore - pt.totalBytesAfter
-	tokensSaved := int(bytesSaved / 4)
-	moneySaved := float64(tokensSaved) * costPerToken
+	tokensSaved := TokensFromBytes(bytesSaved)
+	moneySaved := MoneySavedUSD(tokensSaved, DefaultInputPricePerMillionUSD)
 
 	ops := 100.0
 	if pt.totalBytesBefore > 0 {

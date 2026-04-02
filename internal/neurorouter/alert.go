@@ -49,8 +49,9 @@ type Alert struct {
 type AlertInjector struct {
 	mu sync.Mutex
 
-	verbosity Verbosity
-	dnd       *DND // nil = no DND
+	verbosity               Verbosity
+	dnd                     *DND // nil = no DND
+	inputPricePerMillionUSD float64
 
 	// Throttling state.
 	recentAlerts   []string // last N alert messages for dedup
@@ -69,12 +70,18 @@ type AlertInjector struct {
 
 // NewAlertInjector creates an injector with default settings.
 func NewAlertInjector(verbosity Verbosity, dnd *DND) *AlertInjector {
+	return NewAlertInjectorWithPricing(verbosity, dnd, DefaultInputPricePerMillionUSD)
+}
+
+// NewAlertInjectorWithPricing creates an injector with configurable savings pricing.
+func NewAlertInjectorWithPricing(verbosity Verbosity, dnd *DND, inputPricePerMillionUSD float64) *AlertInjector {
 	return &AlertInjector{
-		verbosity:      verbosity,
-		dnd:            dnd,
-		throttleWindow: 10,
-		recentWindow:   5,
-		maxSuggestions: 1,
+		verbosity:               verbosity,
+		dnd:                     dnd,
+		inputPricePerMillionUSD: NormalizeInputPricePerMillionUSD(inputPricePerMillionUSD),
+		throttleWindow:          10,
+		recentWindow:            5,
+		maxSuggestions:          1,
 	}
 }
 
@@ -107,11 +114,9 @@ func (ai *AlertInjector) Generate(result *PipelineResult, suggestions []Suggesti
 	}
 
 	// Important: significant waste removed (>1KB saved).
-	bytesSaved := result.BytesBefore - result.BytesAfter
-	if bytesSaved > 1024 && len(result.FiltersRun) > 0 {
-		tokensSaved := bytesSaved / 4
-		cost := float64(tokensSaved) * costPerToken
-		msg := fmt.Sprintf("Removed %dK tokens (~$%.2f saved)", tokensSaved/1000, cost)
+	summary := SummarizeSavings(result.BytesBefore, result.BytesAfter, ai.inputPricePerMillionUSD)
+	if summary.BytesSaved > 1024 && len(result.FiltersRun) > 0 {
+		msg := fmt.Sprintf("Removed %dK tokens (~$%.2f saved)", summary.TokensSaved/1000, summary.MoneySavedUSD)
 		alerts = append(alerts, Alert{Tier: TierImportant, Message: msg})
 	}
 

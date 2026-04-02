@@ -35,7 +35,7 @@ func newSessionRuntime(cfg ProxyConfig) *sessionRuntime {
 		}),
 		audit:  newAuditLog(100),
 		dnd:    dnd,
-		alerts: NewAlertInjector(VerbosityDefault, dnd),
+		alerts: NewAlertInjectorWithPricing(VerbosityDefault, dnd, cfg.InputPricePerMillionUSD),
 	}
 }
 

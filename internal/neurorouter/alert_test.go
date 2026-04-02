@@ -47,6 +47,27 @@ func TestAlertInjector_ImportantOnSignificantWaste(t *testing.T) {
 	}
 }
 
+func TestAlertInjector_UsesConfiguredPricing(t *testing.T) {
+	ai := NewAlertInjectorWithPricing(VerbosityDefault, nil, 6.0)
+
+	alerts := ai.Generate(&PipelineResult{
+		BytesBefore: 10000,
+		BytesAfter:  5000,
+		FiltersRun:  []string{"thinking"},
+	}, nil)
+
+	for _, alert := range alerts {
+		if alert.Tier != TierImportant {
+			continue
+		}
+		if !strings.Contains(alert.Message, "~$0.01 saved") {
+			t.Fatalf("important alert: got %q, want configured savings", alert.Message)
+		}
+		return
+	}
+	t.Fatal("expected important alert")
+}
+
 func TestAlertInjector_NoAlertForSmallSavings(t *testing.T) {
 	ai := NewAlertInjector(VerbosityDefault, nil)
 

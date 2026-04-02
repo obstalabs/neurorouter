@@ -13,14 +13,15 @@ import (
 // Config holds all neurorouter configuration.
 // Precedence: CLI flag > NEUROROUTER_* env var > config file > default.
 type Config struct {
-	ListenPort         int    `toml:"listen_port"`
-	Upstream           string `toml:"upstream"`
-	Verbosity          string `toml:"verbosity"`
-	ContextLimit       int    `toml:"context_limit"`
-	ProtectPolicy      string `toml:"protect_policy"`
-	DNDPersistent      bool   `toml:"dnd_persistent"`
-	StateDBPath        string `toml:"state_db_path"`
-	StateRetentionDays int    `toml:"state_retention_days"`
+	ListenPort              int     `toml:"listen_port"`
+	Upstream                string  `toml:"upstream"`
+	Verbosity               string  `toml:"verbosity"`
+	ContextLimit            int     `toml:"context_limit"`
+	ProtectPolicy           string  `toml:"protect_policy"`
+	InputPricePerMillionUSD float64 `toml:"input_price_per_million_usd"`
+	DNDPersistent           bool    `toml:"dnd_persistent"`
+	StateDBPath             string  `toml:"state_db_path"`
+	StateRetentionDays      int     `toml:"state_retention_days"`
 }
 
 // ConfigKey describes a config key for validation and documentation.
@@ -39,6 +40,7 @@ var ConfigKeys = []ConfigKey{
 	{"verbosity", "string", "default", "alert verbosity level", []string{"silent", "minimal", "default", "verbose"}},
 	{"context_limit", "int", "200000", "context window size in tokens", nil},
 	{"protect_policy", "string", "warn", "secret detection policy", []string{"block", "redact", "warn"}},
+	{"input_price_per_million_usd", "float", "3.0", "estimated input token price used for savings telemetry", nil},
 	{"dnd_persistent", "bool", "false", "persist DND state across restarts", nil},
 	{"state_db_path", "string", "~/.neurorouter/state.db", "SQLite state database path", nil},
 	{"state_retention_days", "int", "90", "days to retain state data", nil},
@@ -47,14 +49,15 @@ var ConfigKeys = []ConfigKey{
 // DefaultConfig returns a config with all defaults.
 func DefaultConfig() *Config {
 	return &Config{
-		ListenPort:         4000,
-		Upstream:           "",
-		Verbosity:          "default",
-		ContextLimit:       200000,
-		ProtectPolicy:      "warn",
-		DNDPersistent:      false,
-		StateDBPath:        DefaultDBPath(),
-		StateRetentionDays: 90,
+		ListenPort:              4000,
+		Upstream:                "",
+		Verbosity:               "default",
+		ContextLimit:            200000,
+		ProtectPolicy:           "warn",
+		InputPricePerMillionUSD: DefaultInputPricePerMillionUSD,
+		DNDPersistent:           false,
+		StateDBPath:             DefaultDBPath(),
+		StateRetentionDays:      90,
 	}
 }
 
@@ -106,6 +109,11 @@ func overlayEnv(cfg *Config) {
 	if v := os.Getenv("NEUROROUTER_PROTECT_POLICY"); v != "" {
 		cfg.ProtectPolicy = v
 	}
+	if v := os.Getenv("NEUROROUTER_INPUT_PRICE_PER_MILLION_USD"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.InputPricePerMillionUSD = n
+		}
+	}
 	if v := os.Getenv("NEUROROUTER_STATE_DB_PATH"); v != "" {
 		cfg.StateDBPath = v
 	}
@@ -131,6 +139,10 @@ func validateValue(k ConfigKey, value string) error {
 	case "int":
 		if _, err := strconv.Atoi(value); err != nil {
 			return fmt.Errorf("%s must be an integer", k.Name)
+		}
+	case "float":
+		if _, err := strconv.ParseFloat(value, 64); err != nil {
+			return fmt.Errorf("%s must be a float", k.Name)
 		}
 	case "bool":
 		if value != "true" && value != "false" {
@@ -182,6 +194,9 @@ func SetConfigValue(path, key, value string) error {
 		cfg.ContextLimit = n
 	case "protect_policy":
 		cfg.ProtectPolicy = value
+	case "input_price_per_million_usd":
+		n, _ := strconv.ParseFloat(value, 64)
+		cfg.InputPricePerMillionUSD = n
 	case "dnd_persistent":
 		cfg.DNDPersistent = value == "true"
 	case "state_db_path":
@@ -256,6 +271,8 @@ func GetConfigValue(cfg *Config, key string) (string, error) {
 		return strconv.Itoa(cfg.ContextLimit), nil
 	case "protect_policy":
 		return cfg.ProtectPolicy, nil
+	case "input_price_per_million_usd":
+		return strconv.FormatFloat(cfg.InputPricePerMillionUSD, 'f', -1, 64), nil
 	case "dnd_persistent":
 		if cfg.DNDPersistent {
 			return "true", nil

@@ -42,20 +42,21 @@ var proxyCmd = &cobra.Command{
 }
 
 type proxyRuntimeSettings struct {
-	Listen           string
-	Target           string
-	APIKey           string
-	SecretReport     string
-	ShellMaxBytes    int
-	ClientAuth       bool
-	ProtectPolicy    string
-	PublicBind       bool
-	ExposeManagement bool
-	NoProtect        bool
-	NoFilter         bool
-	NoCache          bool
-	DryRun           bool
-	Debug            bool
+	Listen                  string
+	Target                  string
+	APIKey                  string
+	SecretReport            string
+	ShellMaxBytes           int
+	InputPricePerMillionUSD float64
+	ClientAuth              bool
+	ProtectPolicy           string
+	PublicBind              bool
+	ExposeManagement        bool
+	NoProtect               bool
+	NoFilter                bool
+	NoCache                 bool
+	DryRun                  bool
+	Debug                   bool
 }
 
 func addProxyFlags(cmd *cobra.Command) {
@@ -71,6 +72,7 @@ func addProxyFlags(cmd *cobra.Command) {
 	f.Bool("no-protect", false, "disable secret detection")
 	f.Bool("no-filter", false, "disable content filters")
 	f.Int("shell-max-output-bytes", 0, "truncate native shell outputs above this many bytes (0 disables)")
+	f.Float64("input-price-per-million-usd", neurorouter.DefaultInputPricePerMillionUSD, "estimated input token price used for savings telemetry")
 	f.Bool("no-cache", false, "disable neurocache pattern detection")
 	f.Bool("dry-run", false, "show filtered vs original without sending upstream")
 	f.Bool("debug", false, "enable debug logging")
@@ -105,6 +107,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	apiKey := settings.APIKey
 	secretReport := settings.SecretReport
 	shellMaxBytes := settings.ShellMaxBytes
+	inputPricePerMillionUSD := settings.InputPricePerMillionUSD
 	clientAuth := settings.ClientAuth
 	protectPolicy := settings.ProtectPolicy
 	noProtect := settings.NoProtect
@@ -143,7 +146,8 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		Targets: map[string]neurorouter.Target{
 			"default": {BaseURL: target, APIKey: apiKey},
 		},
-		DryRun: dryRun,
+		InputPricePerMillionUSD: inputPricePerMillionUSD,
+		DryRun:                  dryRun,
 	}
 
 	if !noFilter {
@@ -167,11 +171,12 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 
 	// Session tracking for first-run and shutdown summary.
 	var (
-		requestCount int
-		totalBefore  int
-		totalAfter   int
-		totalSecrets int
-		firstRequest = true
+		requestCount          int
+		totalBefore           int
+		totalAfter            int
+		totalSecrets          int
+		recurringFingerprints = make(map[string]int)
+		firstRequest          = true
 	)
 
 	cfg.OnRequest = func(e neurorouter.RequestEvent) {
@@ -180,7 +185,6 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		totalAfter += e.BytesAfter
 		totalSecrets += e.SecretsFound
 
-		bytesSaved := e.BytesBefore - e.BytesAfter
 		filters := ""
 		if len(e.FiltersRun) > 0 {
 			filters = "  filters=[" + strings.Join(e.FiltersRun, ",") + "]"
@@ -189,18 +193,21 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		if e.SecretsFound > 0 {
 			secrets = fmt.Sprintf("  secrets=%d", e.SecretsFound)
 		}
+		recurring := ""
+		if label := trackRecurringFingerprint(recurringFingerprints, e.BytesBefore, e.BytesAfter, e.FiltersRun); label != "" {
+			recurring = "  fp=" + label
+		}
 		fmt.Fprintf(os.Stderr, "[req] model=%s  bytes=%d→%d (%s)%s%s\n",
-			e.Model, e.BytesBefore, e.BytesAfter, formatRequestDelta(e.BytesBefore, e.BytesAfter), filters, secrets)
+			e.Model, e.BytesBefore, e.BytesAfter, formatRequestSummary(e.BytesBefore, e.BytesAfter, inputPricePerMillionUSD), filters, secrets+recurring)
 		if secretReport == secretReportRedacted && len(e.SecretDiagnostics) > 0 {
 			printSecretDiagnostics(os.Stderr, e.SecretDiagnostics)
 		}
 
 		if firstRequest {
 			firstRequest = false
-			if bytesSaved > 0 {
-				tokensSaved := bytesSaved / 4
-				cost := float64(tokensSaved) * 3.0 / 1_000_000
-				fmt.Fprintf(os.Stderr, "\n      NeuroRouter saved %d tokens ($%.4f) on your first request.\n", tokensSaved, cost)
+			summary := neurorouter.SummarizeSavings(e.BytesBefore, e.BytesAfter, inputPricePerMillionUSD)
+			if summary.BytesSaved > 0 {
+				fmt.Fprintf(os.Stderr, "\n      NeuroRouter saved %d tokens ($%.4f) on your first request.\n", summary.TokensSaved, summary.MoneySavedUSD)
 				fmt.Fprintf(os.Stderr, "      Run 'neurorouter stats' to see cumulative savings.\n\n")
 			}
 		}
@@ -252,16 +259,10 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 
 	// Session summary.
 	if requestCount > 0 {
-		bytesSaved := totalBefore - totalAfter
-		tokensSaved := bytesSaved / 4
-		cost := float64(tokensSaved) * 3.0 / 1_000_000
-		savedPct := 0
-		if totalBefore > 0 {
-			savedPct = bytesSaved * 100 / totalBefore
-		}
+		summary := neurorouter.SummarizeSavings(totalBefore, totalAfter, inputPricePerMillionUSD)
 		fmt.Fprintf(os.Stderr, "\nSession summary (%d requests):\n", requestCount)
 		fmt.Fprintf(os.Stderr, "  Saved: %dKB / %d tokens / $%.4f (%d%% noise removed)\n",
-			bytesSaved/1024, tokensSaved, cost, savedPct)
+			summary.BytesSaved/1024, summary.TokensSaved, summary.MoneySavedUSD, summary.SavedPercent)
 		if totalSecrets > 0 {
 			fmt.Fprintf(os.Stderr, "  Secrets caught: %d\n", totalSecrets)
 		}
@@ -443,20 +444,21 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 	}
 
 	settings := proxyRuntimeSettings{
-		Listen:           listenAddressForPort(cfg.ListenPort),
-		Target:           cfg.Upstream,
-		ProtectPolicy:    cfg.ProtectPolicy,
-		APIKey:           flagString(cmd, "api-key"),
-		SecretReport:     flagString(cmd, "secret-report"),
-		ShellMaxBytes:    flagInt(cmd, "shell-max-output-bytes"),
-		ClientAuth:       flagBool(cmd, "client-auth"),
-		PublicBind:       flagBool(cmd, "public"),
-		ExposeManagement: flagBool(cmd, "expose-management"),
-		NoProtect:        flagBool(cmd, "no-protect"),
-		NoFilter:         flagBool(cmd, "no-filter"),
-		NoCache:          flagBool(cmd, "no-cache"),
-		DryRun:           flagBool(cmd, "dry-run"),
-		Debug:            flagBool(cmd, "debug"),
+		Listen:                  listenAddressForPort(cfg.ListenPort),
+		Target:                  cfg.Upstream,
+		ProtectPolicy:           cfg.ProtectPolicy,
+		InputPricePerMillionUSD: cfg.InputPricePerMillionUSD,
+		APIKey:                  flagString(cmd, "api-key"),
+		SecretReport:            flagString(cmd, "secret-report"),
+		ShellMaxBytes:           flagInt(cmd, "shell-max-output-bytes"),
+		ClientAuth:              flagBool(cmd, "client-auth"),
+		PublicBind:              flagBool(cmd, "public"),
+		ExposeManagement:        flagBool(cmd, "expose-management"),
+		NoProtect:               flagBool(cmd, "no-protect"),
+		NoFilter:                flagBool(cmd, "no-filter"),
+		NoCache:                 flagBool(cmd, "no-cache"),
+		DryRun:                  flagBool(cmd, "dry-run"),
+		Debug:                   flagBool(cmd, "debug"),
 	}
 
 	if cmd.Flags().Changed("listen") {
@@ -473,6 +475,7 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 		return proxyRuntimeSettings{}, err
 	}
 	settings.SecretReport = secretReport
+	settings.InputPricePerMillionUSD = resolveInputPricePerMillionUSD(cmd, cfg)
 
 	return settings, nil
 }
@@ -509,5 +512,10 @@ func flagBool(cmd *cobra.Command, name string) bool {
 
 func flagInt(cmd *cobra.Command, name string) int {
 	val, _ := cmd.Flags().GetInt(name)
+	return val
+}
+
+func flagFloat(cmd *cobra.Command, name string) float64 {
+	val, _ := cmd.Flags().GetFloat64(name)
 	return val
 }

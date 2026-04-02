@@ -42,17 +42,18 @@ type PoolTarget struct {
 
 // ProxyConfig holds proxy server configuration.
 type ProxyConfig struct {
-	Listen            string // defaults to 127.0.0.1:4000
-	AllowPublicListen bool   // require explicit opt-in for non-loopback binds
-	ExposeManagement  bool   // expose audit/suggestions on public binds
-	Capabilities      map[string]TargetCapabilities
-	Targets           map[string]Target       // model name → single target (backward compat)
-	TargetPool        map[string][]PoolTarget // model name → multiple targets with load balancing
-	Filters           FilterConfig            // content filter configuration
-	Protection        ProtectConfig           // secret detection configuration
-	Neurocache        NeurocacheConfig        // neurocache configuration
-	DryRun            bool                    // if true, show filtered vs original without sending
-	OnRequest         func(RequestEvent)      // callback for per-request logging (nil = no logging)
+	Listen                  string // defaults to 127.0.0.1:4000
+	AllowPublicListen       bool   // require explicit opt-in for non-loopback binds
+	ExposeManagement        bool   // expose audit/suggestions on public binds
+	Capabilities            map[string]TargetCapabilities
+	Targets                 map[string]Target       // model name → single target (backward compat)
+	TargetPool              map[string][]PoolTarget // model name → multiple targets with load balancing
+	Filters                 FilterConfig            // content filter configuration
+	Protection              ProtectConfig           // secret detection configuration
+	Neurocache              NeurocacheConfig        // neurocache configuration
+	InputPricePerMillionUSD float64                 // estimated input token price for savings telemetry
+	DryRun                  bool                    // if true, show filtered vs original without sending
+	OnRequest               func(RequestEvent)      // callback for per-request logging (nil = no logging)
 }
 
 // RequestEvent is emitted after each proxied request for CLI output.
@@ -340,7 +341,11 @@ func (p *Proxy) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if strings.ToLower(strings.TrimSpace(r.URL.Query().Get("secret_report"))) != "redacted" {
 		entries = stripAuditSecretDiagnostics(entries)
 	}
-	data, _ := json.Marshal(map[string]any{"entries": entries, "count": len(entries)})
+	data, _ := json.Marshal(map[string]any{
+		"entries":                     entries,
+		"count":                       len(entries),
+		"input_price_per_million_usd": NormalizeInputPricePerMillionUSD(p.cfg.InputPricePerMillionUSD),
+	})
 	_, _ = w.Write(data)
 }
 

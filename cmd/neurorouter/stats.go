@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/ppiankov/neurorouter/internal/neurorouter"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +20,7 @@ func init() {
 	statsCmd.Flags().String("addr", "localhost:4000", "proxy address to query")
 	statsCmd.Flags().Bool("json", false, "output as JSON")
 	statsCmd.Flags().String("session", "", "session identifier to inspect")
+	statsCmd.Flags().Float64("input-price-per-million-usd", neurorouter.DefaultInputPricePerMillionUSD, "estimated input token price used for savings telemetry")
 }
 
 func runStats(cmd *cobra.Command, _ []string) error {
@@ -26,6 +28,12 @@ func runStats(cmd *cobra.Command, _ []string) error {
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	session, _ := cmd.Flags().GetString("session")
 	out := cmd.OutOrStdout()
+	priceFlagChanged := cmd.Flags().Changed("input-price-per-million-usd")
+	cfg, err := neurorouter.LoadConfig("")
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	inputPricePerMillionUSD := resolveInputPricePerMillionUSD(cmd, cfg)
 
 	// Fetch suggestions.
 	sugResp, err := http.Get(managementURL(addr, "/v1/suggestions", session))
@@ -66,16 +74,14 @@ func runStats(cmd *cobra.Command, _ []string) error {
 	_ = json.Unmarshal(sugBody, &sugData)
 
 	var auditData struct {
-		Count   int `json:"count"`
-		Entries []struct {
-			Model        string   `json:"model"`
-			BytesBefore  int      `json:"bytes_before"`
-			BytesAfter   int      `json:"bytes_after"`
-			FiltersRun   []string `json:"filters_run"`
-			SecretsFound int      `json:"secrets_found"`
-		} `json:"entries"`
+		Count                   int                      `json:"count"`
+		Entries                 []neurorouter.AuditEntry `json:"entries"`
+		InputPricePerMillionUSD float64                  `json:"input_price_per_million_usd"`
 	}
 	_ = json.Unmarshal(auditBody, &auditData)
+	if !priceFlagChanged && auditData.InputPricePerMillionUSD > 0 {
+		inputPricePerMillionUSD = neurorouter.NormalizeInputPricePerMillionUSD(auditData.InputPricePerMillionUSD)
+	}
 
 	// Aggregate from audit entries.
 	totalReqs := auditData.Count
@@ -90,10 +96,6 @@ func runStats(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	bytesSaved := totalBefore - totalAfter
-	tokensSaved := bytesSaved / 4
-	moneySaved := float64(tokensSaved) * 3.0 / 1_000_000
-
 	if _, err := fmt.Fprintf(out, "Session stats (%d requests)\n", totalReqs); err != nil {
 		return err
 	}
@@ -102,12 +104,9 @@ func runStats(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	savedPct := 0
-	if totalBefore > 0 {
-		savedPct = bytesSaved * 100 / totalBefore
-	}
+	summary := neurorouter.SummarizeSavings(totalBefore, totalAfter, inputPricePerMillionUSD)
 	if _, err := fmt.Fprintf(out, "  Bytes: %dKB → %dKB (%d%% saved, ~$%.4f saved)\n",
-		totalBefore/1024, totalAfter/1024, savedPct, moneySaved); err != nil {
+		totalBefore/1024, totalAfter/1024, summary.SavedPercent, summary.MoneySavedUSD); err != nil {
 		return err
 	}
 
@@ -122,6 +121,11 @@ func runStats(cmd *cobra.Command, _ []string) error {
 	}
 	if topFilter != "" {
 		if _, err := fmt.Fprintf(out, "  Top filter: %s (%d activations)\n", topFilter, topHits); err != nil {
+			return err
+		}
+	}
+	if recurring := topRecurringFingerprint(auditData.Entries); recurring != "" {
+		if _, err := fmt.Fprintf(out, "  Recurring: %s\n", recurring); err != nil {
 			return err
 		}
 	}

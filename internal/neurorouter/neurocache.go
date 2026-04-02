@@ -39,14 +39,6 @@ type Suggestion struct {
 	ProjectedImprovement string             `json:"projected_improvement"` // "OPS 45% → 72%, ~$12/session saved"
 }
 
-// costPerToken is the assumed input token cost for suggestions ($3/M tokens ≈ Claude Sonnet).
-const costPerToken = 3.0 / 1_000_000
-
-// tokensFromBytes estimates tokens from byte count (1 token ≈ 4 bytes).
-func tokensFromBytes(bytes int64) int {
-	return int(bytes / 4)
-}
-
 // NeurocacheConfig controls the neurocache.
 type NeurocacheConfig struct {
 	Enabled bool
@@ -164,49 +156,49 @@ func (nc *Neurocache) Suggestions() []Suggestion {
 	for path, count := range nc.fileReads {
 		if count >= 3 {
 			wasteBytes := int64(count-1) * 4096 // estimate ~4KB per redundant read
-			tokens := tokensFromBytes(wasteBytes)
-			cost := float64(tokens) * costPerToken
+			tokens := TokensFromBytes(wasteBytes)
+			cost := MoneySavedUSD(tokens, DefaultInputPricePerMillionUSD)
 			severity := SeverityLow
 			if cost > 5.0 {
 				severity = SeverityHigh
 			} else if cost > 1.0 {
 				severity = SeverityMedium
 			}
-				suggestions = append(suggestions, Suggestion{
-					Type:                 "stale_reads",
-					Category:             CategoryHook,
-					Severity:             severity,
-					Metric:               fmt.Sprintf("%s read %d times (%dKB waste)", path, count, wasteBytes/1024),
-					TokensWasted:         tokens,
-					CostUSD:              cost,
-					Action:               "install read-cache hook to avoid redundant file reads",
-					InstallAction:        "review repeated reads with neurorouter audit or stats and cache file contents in the client workflow",
-					ProjectedImprovement: fmt.Sprintf("%d fewer reads, ~$%.2f/session saved", count-1, cost),
-				})
+			suggestions = append(suggestions, Suggestion{
+				Type:                 "stale_reads",
+				Category:             CategoryHook,
+				Severity:             severity,
+				Metric:               fmt.Sprintf("%s read %d times (%dKB waste)", path, count, wasteBytes/1024),
+				TokensWasted:         tokens,
+				CostUSD:              cost,
+				Action:               "install read-cache hook to avoid redundant file reads",
+				InstallAction:        "review repeated reads with neurorouter audit or stats and cache file contents in the client workflow",
+				ProjectedImprovement: fmt.Sprintf("%d fewer reads, ~$%.2f/session saved", count-1, cost),
+			})
 		}
 	}
 
 	// Reminder duplication: if total reminder bytes > 2x unique.
 	if nc.uniqueRemBytes > 0 && nc.reminderBytes > nc.uniqueRemBytes*2 {
 		wasteBytes := nc.reminderBytes - nc.uniqueRemBytes
-		tokens := tokensFromBytes(wasteBytes)
-		cost := float64(tokens) * costPerToken
+		tokens := TokensFromBytes(wasteBytes)
+		cost := MoneySavedUSD(tokens, DefaultInputPricePerMillionUSD)
 		severity := SeverityMedium
 		if cost > 5.0 {
 			severity = SeverityHigh
 		}
 		ratio := float64(nc.reminderBytes) / float64(nc.uniqueRemBytes)
-			suggestions = append(suggestions, Suggestion{
-				Type:                 "reminder_spam",
-				Category:             CategoryFilter,
-				Severity:             severity,
+		suggestions = append(suggestions, Suggestion{
+			Type:                 "reminder_spam",
+			Category:             CategoryFilter,
+			Severity:             severity,
 			Metric:               fmt.Sprintf("reminders duplicated %.0fx (%dKB total, %dKB unique)", ratio, nc.reminderBytes/1024, nc.uniqueRemBytes/1024),
-				TokensWasted:         tokens,
-				CostUSD:              cost,
-				Action:               "enable system_reminders filter to deduplicate automatically",
-				InstallAction:        "keep NeuroRouter filters enabled (default) so reminder cleanup stays active",
-				ProjectedImprovement: fmt.Sprintf("%dKB saved per session, ~$%.2f", wasteBytes/1024, cost),
-			})
+			TokensWasted:         tokens,
+			CostUSD:              cost,
+			Action:               "enable system_reminders filter to deduplicate automatically",
+			InstallAction:        "keep NeuroRouter filters enabled (default) so reminder cleanup stays active",
+			ProjectedImprovement: fmt.Sprintf("%dKB saved per session, ~$%.2f", wasteBytes/1024, cost),
+		})
 	}
 
 	// Context bloat: if average waste > 25%.
@@ -214,40 +206,40 @@ func (nc *Neurocache) Suggestions() []Suggestion {
 		wasteRatio := 1.0 - float64(nc.totalBytesAfter)/float64(nc.totalBytesBefore)
 		if wasteRatio > 0.25 {
 			wasteBytes := nc.totalBytesBefore - nc.totalBytesAfter
-			tokens := tokensFromBytes(wasteBytes)
-			cost := float64(tokens) * costPerToken
+			tokens := TokensFromBytes(wasteBytes)
+			cost := MoneySavedUSD(tokens, DefaultInputPricePerMillionUSD)
 			severity := SeverityHigh
 			if wasteRatio < 0.30 {
 				severity = SeverityMedium
 			}
-				suggestions = append(suggestions, Suggestion{
-					Type:                 "context_bloat",
-					Category:             CategorySkill,
+			suggestions = append(suggestions, Suggestion{
+				Type:                 "context_bloat",
+				Category:             CategorySkill,
 				Severity:             severity,
 				Metric:               fmt.Sprintf("%.0f%% of context is noise (%dKB wasted across %d requests)", wasteRatio*100, wasteBytes/1024, nc.requestCount),
-					TokensWasted:         tokens,
-					CostUSD:              cost,
-					Action:               "trigger /compact at 35K token threshold",
-					InstallAction:        "compact earlier in the client session and keep NeuroRouter filters enabled",
-					ProjectedImprovement: fmt.Sprintf("%.0f%% noise reduction, ~$%.2f/session saved", wasteRatio*100, cost),
-				})
+				TokensWasted:         tokens,
+				CostUSD:              cost,
+				Action:               "trigger /compact at 35K token threshold",
+				InstallAction:        "compact earlier in the client session and keep NeuroRouter filters enabled",
+				ProjectedImprovement: fmt.Sprintf("%.0f%% noise reduction, ~$%.2f/session saved", wasteRatio*100, cost),
+			})
 		}
 	}
 
 	// Request repeats: same content sent 3+ times.
 	for _, count := range nc.recentHashes {
 		if count >= 3 {
-				suggestions = append(suggestions, Suggestion{
-					Type:                 "request_repeat",
-					Category:             CategoryHook,
+			suggestions = append(suggestions, Suggestion{
+				Type:                 "request_repeat",
+				Category:             CategoryHook,
 				Severity:             SeverityMedium,
 				Metric:               fmt.Sprintf("identical prompt sent %d times", count),
-					TokensWasted:         0, // unknown without content size
-					CostUSD:              0,
-					Action:               "cache this response or use a deterministic approach",
-					InstallAction:        "inspect repeated requests with neurorouter stats or audit and fix the retry path in the client workflow",
-					ProjectedImprovement: fmt.Sprintf("%d duplicate requests eliminated", count-1),
-				})
+				TokensWasted:         0, // unknown without content size
+				CostUSD:              0,
+				Action:               "cache this response or use a deterministic approach",
+				InstallAction:        "inspect repeated requests with neurorouter stats or audit and fix the retry path in the client workflow",
+				ProjectedImprovement: fmt.Sprintf("%d duplicate requests eliminated", count-1),
+			})
 		}
 	}
 
@@ -255,45 +247,45 @@ func (nc *Neurocache) Suggestions() []Suggestion {
 	if nc.totalBytesBefore > 0 && nc.thinkingBytes > 0 {
 		thinkRatio := float64(nc.thinkingBytes) / float64(nc.totalBytesBefore)
 		if thinkRatio > 0.10 {
-			tokens := tokensFromBytes(nc.thinkingBytes)
-			cost := float64(tokens) * costPerToken
+			tokens := TokensFromBytes(nc.thinkingBytes)
+			cost := MoneySavedUSD(tokens, DefaultInputPricePerMillionUSD)
 			severity := SeverityMedium
 			if thinkRatio > 0.25 {
 				severity = SeverityHigh
 			}
-				suggestions = append(suggestions, Suggestion{
-					Type:                 "thinking_bloat",
-					Category:             CategoryFilter,
+			suggestions = append(suggestions, Suggestion{
+				Type:                 "thinking_bloat",
+				Category:             CategoryFilter,
 				Severity:             severity,
 				Metric:               fmt.Sprintf("%.0f%% of token spend is thinking blocks (%dKB)", thinkRatio*100, nc.thinkingBytes/1024),
-					TokensWasted:         tokens,
-					CostUSD:              cost,
-					Action:               "enable thinking filter to strip thinking blocks",
-					InstallAction:        "keep NeuroRouter filters enabled (default) so thinking cleanup stays active",
-					ProjectedImprovement: fmt.Sprintf("%.0f%% cost reduction on thinking-heavy sessions", thinkRatio*100),
-				})
+				TokensWasted:         tokens,
+				CostUSD:              cost,
+				Action:               "enable thinking filter to strip thinking blocks",
+				InstallAction:        "keep NeuroRouter filters enabled (default) so thinking cleanup stays active",
+				ProjectedImprovement: fmt.Sprintf("%.0f%% cost reduction on thinking-heavy sessions", thinkRatio*100),
+			})
 		}
 	}
 
 	// Large tool outputs: if 5+ large outputs seen.
 	if nc.largeOutputCount >= 5 {
-		tokens := tokensFromBytes(nc.largeOutputBytes)
-		cost := float64(tokens) * costPerToken
+		tokens := TokensFromBytes(nc.largeOutputBytes)
+		cost := MoneySavedUSD(tokens, DefaultInputPricePerMillionUSD)
 		severity := SeverityMedium
 		if cost > 5.0 {
 			severity = SeverityHigh
 		}
-			suggestions = append(suggestions, Suggestion{
-				Type:                 "large_tool_output",
-				Category:             CategoryPolicy,
+		suggestions = append(suggestions, Suggestion{
+			Type:                 "large_tool_output",
+			Category:             CategoryPolicy,
 			Severity:             severity,
 			Metric:               fmt.Sprintf("%d tool outputs >10KB (%dKB total)", nc.largeOutputCount, nc.largeOutputBytes/1024),
-				TokensWasted:         tokens,
-				CostUSD:              cost,
-				Action:               "set max tool output size policy to truncate large results",
-				InstallAction:        "trim file reads, command output, or diffs in the client workflow before they reach the model",
-				ProjectedImprovement: fmt.Sprintf("%dKB saved, ~$%.2f/session", nc.largeOutputBytes/1024, cost),
-			})
+			TokensWasted:         tokens,
+			CostUSD:              cost,
+			Action:               "set max tool output size policy to truncate large results",
+			InstallAction:        "trim file reads, command output, or diffs in the client workflow before they reach the model",
+			ProjectedImprovement: fmt.Sprintf("%dKB saved, ~$%.2f/session", nc.largeOutputBytes/1024, cost),
+		})
 	}
 
 	return suggestions

@@ -17,6 +17,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.ProtectPolicy != "warn" {
 		t.Errorf("expected warn policy, got %s", cfg.ProtectPolicy)
 	}
+	if cfg.InputPricePerMillionUSD != DefaultInputPricePerMillionUSD {
+		t.Errorf("expected default input price %.1f, got %.1f", DefaultInputPricePerMillionUSD, cfg.InputPricePerMillionUSD)
+	}
 	if cfg.StateRetentionDays != 90 {
 		t.Errorf("expected 90 days retention, got %d", cfg.StateRetentionDays)
 	}
@@ -39,6 +42,7 @@ func TestLoadConfig_FromFile(t *testing.T) {
 listen_port = 5000
 verbosity = "verbose"
 protect_policy = "block"
+input_price_per_million_usd = 4.5
 `), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -56,6 +60,9 @@ protect_policy = "block"
 	if cfg.ProtectPolicy != "block" {
 		t.Errorf("expected block, got %s", cfg.ProtectPolicy)
 	}
+	if cfg.InputPricePerMillionUSD != 4.5 {
+		t.Errorf("expected 4.5, got %.1f", cfg.InputPricePerMillionUSD)
+	}
 }
 
 func TestLoadConfig_EnvOverride(t *testing.T) {
@@ -66,6 +73,7 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	}
 
 	t.Setenv("NEUROROUTER_LISTEN_PORT", "6000")
+	t.Setenv("NEUROROUTER_INPUT_PRICE_PER_MILLION_USD", "5.5")
 
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -73,6 +81,9 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	}
 	if cfg.ListenPort != 6000 {
 		t.Errorf("env should override file: expected 6000, got %d", cfg.ListenPort)
+	}
+	if cfg.InputPricePerMillionUSD != 5.5 {
+		t.Errorf("env should override price: expected 5.5, got %.1f", cfg.InputPricePerMillionUSD)
 	}
 }
 
@@ -88,6 +99,8 @@ func TestValidateKey(t *testing.T) {
 		{"verbosity", "invalid", false},
 		{"protect_policy", "block", true},
 		{"protect_policy", "yolo", false},
+		{"input_price_per_million_usd", "3.5", true},
+		{"input_price_per_million_usd", "abc", false},
 		{"dnd_persistent", "true", true},
 		{"dnd_persistent", "maybe", false},
 		{"unknown_key", "value", false},
@@ -111,6 +124,9 @@ func TestSetConfigValue(t *testing.T) {
 	if err := SetConfigValue(path, "listen_port", "9000"); err != nil {
 		t.Fatalf("set: %v", err)
 	}
+	if err := SetConfigValue(path, "input_price_per_million_usd", "4.25"); err != nil {
+		t.Fatalf("set price: %v", err)
+	}
 
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -118,6 +134,9 @@ func TestSetConfigValue(t *testing.T) {
 	}
 	if cfg.ListenPort != 9000 {
 		t.Errorf("expected 9000, got %d", cfg.ListenPort)
+	}
+	if cfg.InputPricePerMillionUSD != 4.25 {
+		t.Errorf("expected 4.25, got %.2f", cfg.InputPricePerMillionUSD)
 	}
 }
 
@@ -133,6 +152,7 @@ func TestSetConfigValue_Rejects(t *testing.T) {
 func TestGetConfigValue(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ListenPort = 8080
+	cfg.InputPricePerMillionUSD = 6.25
 
 	val, err := GetConfigValue(cfg, "listen_port")
 	if err != nil {
@@ -140,6 +160,13 @@ func TestGetConfigValue(t *testing.T) {
 	}
 	if val != "8080" {
 		t.Errorf("expected 8080, got %s", val)
+	}
+	price, err := GetConfigValue(cfg, "input_price_per_million_usd")
+	if err != nil {
+		t.Fatalf("get price: %v", err)
+	}
+	if price != "6.25" {
+		t.Errorf("expected 6.25, got %s", price)
 	}
 }
 
