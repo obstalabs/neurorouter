@@ -45,6 +45,7 @@ type proxyRuntimeSettings struct {
 	Listen           string
 	Target           string
 	APIKey           string
+	SecretReport     string
 	ShellMaxBytes    int
 	ClientAuth       bool
 	ProtectPolicy    string
@@ -66,6 +67,7 @@ func addProxyFlags(cmd *cobra.Command) {
 	f.String("api-key", "", "API key (or env:VAR_NAME; auto-detected if omitted)")
 	f.Bool("client-auth", false, "forward client Authorization header instead of auto-configuring proxy auth")
 	f.String("protect-policy", "warn", "secret policy: block, redact, warn")
+	f.String("secret-report", secretReportOff, "secret diagnostics mode: off, redacted")
 	f.Bool("no-protect", false, "disable secret detection")
 	f.Bool("no-filter", false, "disable content filters")
 	f.Int("shell-max-output-bytes", 0, "truncate native shell outputs above this many bytes (0 disables)")
@@ -101,6 +103,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	exposeManagement := settings.ExposeManagement
 	target := settings.Target
 	apiKey := settings.APIKey
+	secretReport := settings.SecretReport
 	shellMaxBytes := settings.ShellMaxBytes
 	clientAuth := settings.ClientAuth
 	protectPolicy := settings.ProtectPolicy
@@ -188,6 +191,9 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "[req] model=%s  bytes=%d→%d (%s)%s%s\n",
 			e.Model, e.BytesBefore, e.BytesAfter, formatRequestDelta(e.BytesBefore, e.BytesAfter), filters, secrets)
+		if secretReport == secretReportRedacted && len(e.SecretDiagnostics) > 0 {
+			printSecretDiagnostics(os.Stderr, e.SecretDiagnostics)
+		}
 
 		if firstRequest {
 			firstRequest = false
@@ -441,6 +447,7 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 		Target:           cfg.Upstream,
 		ProtectPolicy:    cfg.ProtectPolicy,
 		APIKey:           flagString(cmd, "api-key"),
+		SecretReport:     flagString(cmd, "secret-report"),
 		ShellMaxBytes:    flagInt(cmd, "shell-max-output-bytes"),
 		ClientAuth:       flagBool(cmd, "client-auth"),
 		PublicBind:       flagBool(cmd, "public"),
@@ -461,6 +468,11 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 	if cmd.Flags().Changed("protect-policy") {
 		settings.ProtectPolicy = flagString(cmd, "protect-policy")
 	}
+	secretReport, err := normalizeSecretReportMode(settings.SecretReport)
+	if err != nil {
+		return proxyRuntimeSettings{}, err
+	}
+	settings.SecretReport = secretReport
 
 	return settings, nil
 }

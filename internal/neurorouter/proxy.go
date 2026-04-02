@@ -57,12 +57,13 @@ type ProxyConfig struct {
 
 // RequestEvent is emitted after each proxied request for CLI output.
 type RequestEvent struct {
-	Model        string
-	BytesBefore  int
-	BytesAfter   int
-	FiltersRun   []string
-	SecretsFound int
-	Blocked      bool
+	Model             string
+	BytesBefore       int
+	BytesAfter        int
+	FiltersRun        []string
+	SecretsFound      int
+	SecretDiagnostics []DetectedSecret
+	Blocked           bool
 }
 
 // Proxy is the local request-cleaning and forwarding proxy.
@@ -336,8 +337,23 @@ func (p *Proxy) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if entries == nil {
 		entries = []AuditEntry{}
 	}
+	if strings.ToLower(strings.TrimSpace(r.URL.Query().Get("secret_report"))) != "redacted" {
+		entries = stripAuditSecretDiagnostics(entries)
+	}
 	data, _ := json.Marshal(map[string]any{"entries": entries, "count": len(entries)})
 	_, _ = w.Write(data)
+}
+
+func stripAuditSecretDiagnostics(entries []AuditEntry) []AuditEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]AuditEntry, len(entries))
+	copy(out, entries)
+	for i := range out {
+		out[i].SecretDiagnostics = nil
+	}
+	return out
 }
 
 func (p *Proxy) handleDNDStatus(w http.ResponseWriter, r *http.Request) {
@@ -462,14 +478,15 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 			// Record blocked request in audit.
 			if runtime.audit != nil && pipeResult != nil {
 				runtime.audit.Record(AuditEntry{
-					Timestamp:    timeNow(),
-					Model:        req.Model,
-					BytesBefore:  pipeResult.BytesBefore,
-					BytesAfter:   0,
-					BytesRemoved: pipeResult.BytesBefore,
-					SecretsFound: pipeResult.SecretsFound,
-					SecretPolicy: string(pipeResult.SecretPolicy),
-					Blocked:      true,
+					Timestamp:         timeNow(),
+					Model:             req.Model,
+					BytesBefore:       pipeResult.BytesBefore,
+					BytesAfter:        0,
+					BytesRemoved:      pipeResult.BytesBefore,
+					SecretsFound:      pipeResult.SecretsFound,
+					SecretDiagnostics: cloneDetectedSecrets(pipeResult.SecretDiagnostics),
+					SecretPolicy:      string(pipeResult.SecretPolicy),
+					Blocked:           true,
 				})
 			}
 			if runtime.dnd != nil {
@@ -508,25 +525,27 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 		// Record transformation in audit log.
 		if runtime.audit != nil {
 			runtime.audit.Record(AuditEntry{
-				Timestamp:    timeNow(),
-				Model:        req.Model,
-				BytesBefore:  pipeResult.BytesBefore,
-				BytesAfter:   pipeResult.BytesAfter,
-				BytesRemoved: pipeResult.BytesBefore - pipeResult.BytesAfter,
-				FiltersRun:   pipeResult.FiltersRun,
-				SecretsFound: pipeResult.SecretsFound,
-				SecretPolicy: string(pipeResult.SecretPolicy),
+				Timestamp:         timeNow(),
+				Model:             req.Model,
+				BytesBefore:       pipeResult.BytesBefore,
+				BytesAfter:        pipeResult.BytesAfter,
+				BytesRemoved:      pipeResult.BytesBefore - pipeResult.BytesAfter,
+				FiltersRun:        pipeResult.FiltersRun,
+				SecretsFound:      pipeResult.SecretsFound,
+				SecretDiagnostics: cloneDetectedSecrets(pipeResult.SecretDiagnostics),
+				SecretPolicy:      string(pipeResult.SecretPolicy),
 			})
 		}
 
 		// Emit per-request event for CLI output.
 		if p.cfg.OnRequest != nil {
 			p.cfg.OnRequest(RequestEvent{
-				Model:        req.Model,
-				BytesBefore:  pipeResult.BytesBefore,
-				BytesAfter:   pipeResult.BytesAfter,
-				FiltersRun:   pipeResult.FiltersRun,
-				SecretsFound: pipeResult.SecretsFound,
+				Model:             req.Model,
+				BytesBefore:       pipeResult.BytesBefore,
+				BytesAfter:        pipeResult.BytesAfter,
+				FiltersRun:        pipeResult.FiltersRun,
+				SecretsFound:      pipeResult.SecretsFound,
+				SecretDiagnostics: cloneDetectedSecrets(pipeResult.SecretDiagnostics),
 			})
 		}
 	}

@@ -147,6 +147,9 @@ func TestScanner_NoFalsePositives(t *testing.T) {
 		"model: gpt-4o-mini",
 		`import "encoding/json"`,
 		"SELECT * FROM users WHERE id = 1",
+		"--api-key env:OPENAI_API_KEY",
+		"export WORKLEDGER_API_KEY=$WORKLEDGER_API_KEY",
+		"Authorization: Bearer $OPENAI_API_KEY",
 	}
 	for _, content := range safe {
 		result := s.ScanContent(content)

@@ -10,15 +10,16 @@ var timeNow = time.Now
 
 // AuditEntry records what happened to a single request.
 type AuditEntry struct {
-	Timestamp    time.Time `json:"timestamp"`
-	Model        string    `json:"model"`
-	BytesBefore  int       `json:"bytes_before"`
-	BytesAfter   int       `json:"bytes_after"`
-	BytesRemoved int       `json:"bytes_removed"`
-	FiltersRun   []string  `json:"filters_run"`
-	SecretsFound int       `json:"secrets_found"`
-	SecretPolicy string    `json:"secret_policy"`
-	Blocked      bool      `json:"blocked"`
+	Timestamp         time.Time        `json:"timestamp"`
+	Model             string           `json:"model"`
+	BytesBefore       int              `json:"bytes_before"`
+	BytesAfter        int              `json:"bytes_after"`
+	BytesRemoved      int              `json:"bytes_removed"`
+	FiltersRun        []string         `json:"filters_run"`
+	SecretsFound      int              `json:"secrets_found"`
+	SecretDiagnostics []DetectedSecret `json:"secret_diagnostics,omitempty"`
+	SecretPolicy      string           `json:"secret_policy"`
+	Blocked           bool             `json:"blocked"`
 }
 
 // auditLog keeps a bounded ring buffer of recent transformation records.

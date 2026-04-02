@@ -3225,6 +3225,85 @@ func TestHandleResponses_NativeResponsesAuditsToolsSchemaCompaction(t *testing.T
 	}
 }
 
+func TestHandleAudit_SecretDiagnosticsRequireExplicitFlag(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ChatCompletionResponse{
+			ID:      "chatcmpl-secret-audit",
+			Model:   "test-model",
+			Choices: []Choice{{Message: ChatMessage{Role: "assistant", Content: "ok"}}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"default": {BaseURL: upstream.URL},
+		},
+		Protection: ProtectConfig{
+			Enabled: true,
+			Policy:  PolicyWarn,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	secret := buildSecret("AKIA", "IOSFODNN7EXAMPL", "E")
+	body := `{"model":"test-model","input":[{"type":"message","role":"user","content":"key=` + secret + `"}],"metadata":{"session_id":"secret-audit"}}`
+	resp, err := http.Post(localProxyURL(addr, "/v1/responses"), "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+
+	defaultAudit := fetchAuditPayload(t, addr, "secret-audit")
+	if len(defaultAudit.Entries) != 1 {
+		t.Fatalf("default audit entries: got %d, want 1", len(defaultAudit.Entries))
+	}
+	if len(defaultAudit.Entries[0].SecretDiagnostics) != 0 {
+		t.Fatalf("expected diagnostics hidden by default, got %+v", defaultAudit.Entries[0].SecretDiagnostics)
+	}
+
+	resp, err = http.Get(localProxyURL(addr, "/v1/audit?session=secret-audit&secret_report=redacted"))
+	if err != nil {
+		t.Fatalf("diagnostic audit: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var payload struct {
+		Count   int          `json:"count"`
+		Entries []AuditEntry `json:"entries"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode diagnostic audit: %v", err)
+	}
+	if len(payload.Entries) != 1 {
+		t.Fatalf("diagnostic audit entries: got %d, want 1", len(payload.Entries))
+	}
+	if len(payload.Entries[0].SecretDiagnostics) != 1 {
+		t.Fatalf("expected one diagnostic with redacted flag, got %+v", payload.Entries[0].SecretDiagnostics)
+	}
+	diag := payload.Entries[0].SecretDiagnostics[0]
+	if diag.Type != SecretAWSKey {
+		t.Fatalf("diagnostic type: got %q, want %q", diag.Type, SecretAWSKey)
+	}
+	if diag.Line != 1 {
+		t.Fatalf("diagnostic line: got %d, want 1", diag.Line)
+	}
+	if !strings.HasSuffix(diag.Value, "...") {
+		t.Fatalf("diagnostic preview should stay redacted, got %q", diag.Value)
+	}
+}
+
 func TestHandleResponses_NativeResponsesAuditsShellTranscriptCleanup(t *testing.T) {
 	var captured map[string]any
 

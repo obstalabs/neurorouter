@@ -14,12 +14,13 @@ type PipelineConfig struct {
 
 // PipelineResult holds metrics from a pipeline run.
 type PipelineResult struct {
-	SecretsFound int
-	SecretPolicy SecretPolicy
-	BytesBefore  int
-	BytesAfter   int
-	FiltersRun   []string
-	Blocked      bool
+	SecretsFound      int
+	SecretDiagnostics []DetectedSecret
+	SecretPolicy      SecretPolicy
+	BytesBefore       int
+	BytesAfter        int
+	FiltersRun        []string
+	Blocked           bool
 }
 
 // Pipeline orchestrates protect → purify on a request's messages.
@@ -71,6 +72,7 @@ func (p *Pipeline) Process(msgs []ChatMessage, adapter FilterAdapter) ([]ChatMes
 	if p.scanner != nil {
 		scan := p.scanner.ScanMessages(msgs)
 		result.SecretsFound = len(scan.Secrets)
+		result.SecretDiagnostics = cloneDetectedSecrets(scan.Secrets)
 
 		if scan.HasSecrets {
 			switch p.policy {

@@ -33,6 +33,9 @@ func TestProxyFlagDefaults(t *testing.T) {
 	if got := cmd.Flags().Lookup("shell-max-output-bytes").DefValue; got != "0" {
 		t.Fatalf("shell-max-output-bytes default: got %q, want 0", got)
 	}
+	if got := cmd.Flags().Lookup("secret-report").DefValue; got != "off" {
+		t.Fatalf("secret-report default: got %q, want off", got)
+	}
 }
 
 func TestResolveProxySettings_Defaults(t *testing.T) {
@@ -51,6 +54,9 @@ func TestResolveProxySettings_Defaults(t *testing.T) {
 	}
 	if settings.ShellMaxBytes != 0 {
 		t.Fatalf("shell max bytes: got %d, want 0", settings.ShellMaxBytes)
+	}
+	if settings.SecretReport != secretReportOff {
+		t.Fatalf("secret report: got %q, want off", settings.SecretReport)
 	}
 }
 
@@ -120,6 +126,7 @@ func TestResolveProxySettings_FlagsOverrideLoadedConfig(t *testing.T) {
 	mustSetFlag(t, cmd, "listen", "localhost:7000")
 	mustSetFlag(t, cmd, "target", "https://flag.example")
 	mustSetFlag(t, cmd, "protect-policy", "warn")
+	mustSetFlag(t, cmd, "secret-report", "redacted")
 	mustSetFlag(t, cmd, "shell-max-output-bytes", "32768")
 
 	settings, err := resolveProxySettings(cmd, cfg)
@@ -137,6 +144,18 @@ func TestResolveProxySettings_FlagsOverrideLoadedConfig(t *testing.T) {
 	}
 	if settings.ShellMaxBytes != 32768 {
 		t.Fatalf("shell max bytes: got %d, want 32768", settings.ShellMaxBytes)
+	}
+	if settings.SecretReport != secretReportRedacted {
+		t.Fatalf("secret report: got %q, want redacted", settings.SecretReport)
+	}
+}
+
+func TestResolveProxySettings_RejectsInvalidSecretReport(t *testing.T) {
+	cmd := newProxyTestCommand()
+	mustSetFlag(t, cmd, "secret-report", "full")
+
+	if _, err := resolveProxySettings(cmd, neurorouter.DefaultConfig()); err == nil {
+		t.Fatal("expected invalid secret-report to fail")
 	}
 }
 

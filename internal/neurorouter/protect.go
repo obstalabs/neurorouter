@@ -30,9 +30,9 @@ const (
 
 // DetectedSecret is a single secret found in message content.
 type DetectedSecret struct {
-	Type  SecretType
-	Value string // truncated preview (first 8 chars + "...")
-	Line  int    // 1-based line number
+	Type  SecretType `json:"type"`
+	Value string     `json:"preview"` // truncated preview (first 8 chars + "...")
+	Line  int        `json:"line"`    // 1-based line number
 }
 
 // ProtectResult summarizes a scan of messages.
@@ -233,6 +233,15 @@ func truncateSecret(s string) string {
 		return s[:len(s)/2] + "..."
 	}
 	return s[:8] + "..."
+}
+
+func cloneDetectedSecrets(secrets []DetectedSecret) []DetectedSecret {
+	if len(secrets) == 0 {
+		return nil
+	}
+	out := make([]DetectedSecret, len(secrets))
+	copy(out, secrets)
+	return out
 }
 
 func countLines(content string, offset int) int {

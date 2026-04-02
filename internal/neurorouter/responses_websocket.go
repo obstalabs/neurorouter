@@ -207,14 +207,15 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 		if pipeErr != nil {
 			if runtime.audit != nil && pipeResult != nil {
 				runtime.audit.Record(AuditEntry{
-					Timestamp:    timeNow(),
-					Model:        req.Model,
-					BytesBefore:  pipeResult.BytesBefore,
-					BytesAfter:   0,
-					BytesRemoved: pipeResult.BytesBefore,
-					SecretsFound: pipeResult.SecretsFound,
-					SecretPolicy: string(pipeResult.SecretPolicy),
-					Blocked:      true,
+					Timestamp:         timeNow(),
+					Model:             req.Model,
+					BytesBefore:       pipeResult.BytesBefore,
+					BytesAfter:        0,
+					BytesRemoved:      pipeResult.BytesBefore,
+					SecretsFound:      pipeResult.SecretsFound,
+					SecretDiagnostics: cloneDetectedSecrets(pipeResult.SecretDiagnostics),
+					SecretPolicy:      string(pipeResult.SecretPolicy),
+					Blocked:           true,
 				})
 			}
 			if runtime.dnd != nil {
@@ -241,24 +242,26 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 
 		if runtime.audit != nil {
 			runtime.audit.Record(AuditEntry{
-				Timestamp:    timeNow(),
-				Model:        req.Model,
-				BytesBefore:  pipeResult.BytesBefore,
-				BytesAfter:   pipeResult.BytesAfter,
-				BytesRemoved: pipeResult.BytesBefore - pipeResult.BytesAfter,
-				FiltersRun:   pipeResult.FiltersRun,
-				SecretsFound: pipeResult.SecretsFound,
-				SecretPolicy: string(pipeResult.SecretPolicy),
+				Timestamp:         timeNow(),
+				Model:             req.Model,
+				BytesBefore:       pipeResult.BytesBefore,
+				BytesAfter:        pipeResult.BytesAfter,
+				BytesRemoved:      pipeResult.BytesBefore - pipeResult.BytesAfter,
+				FiltersRun:        pipeResult.FiltersRun,
+				SecretsFound:      pipeResult.SecretsFound,
+				SecretDiagnostics: cloneDetectedSecrets(pipeResult.SecretDiagnostics),
+				SecretPolicy:      string(pipeResult.SecretPolicy),
 			})
 		}
 
 		if p.cfg.OnRequest != nil {
 			p.cfg.OnRequest(RequestEvent{
-				Model:        req.Model,
-				BytesBefore:  pipeResult.BytesBefore,
-				BytesAfter:   pipeResult.BytesAfter,
-				FiltersRun:   pipeResult.FiltersRun,
-				SecretsFound: pipeResult.SecretsFound,
+				Model:             req.Model,
+				BytesBefore:       pipeResult.BytesBefore,
+				BytesAfter:        pipeResult.BytesAfter,
+				FiltersRun:        pipeResult.FiltersRun,
+				SecretsFound:      pipeResult.SecretsFound,
+				SecretDiagnostics: cloneDetectedSecrets(pipeResult.SecretDiagnostics),
 			})
 		}
 	}

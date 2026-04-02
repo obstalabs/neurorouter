@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ppiankov/neurorouter/internal/neurorouter"
 	"github.com/spf13/cobra"
 )
 
@@ -21,6 +22,7 @@ func init() {
 	auditCmd.Flags().Int("last", 10, "number of entries to show")
 	auditCmd.Flags().Bool("json", false, "output as JSON")
 	auditCmd.Flags().String("session", "", "session identifier to inspect")
+	auditCmd.Flags().String("secret-report", secretReportOff, "secret diagnostics mode: off, redacted")
 }
 
 func runAudit(cmd *cobra.Command, _ []string) error {
@@ -28,9 +30,14 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 	last, _ := cmd.Flags().GetInt("last")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	session, _ := cmd.Flags().GetString("session")
+	secretReportFlag, _ := cmd.Flags().GetString("secret-report")
 	out := cmd.OutOrStdout()
+	secretReport, err := normalizeSecretReportMode(secretReportFlag)
+	if err != nil {
+		return err
+	}
 
-	resp, err := http.Get(managementURL(addr, "/v1/audit", session))
+	resp, err := http.Get(auditManagementURL(addr, session, secretReport))
 	if err != nil {
 		return fmt.Errorf("connect to proxy at %s: %w", addr, err)
 	}
@@ -48,14 +55,15 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 	var data struct {
 		Count   int `json:"count"`
 		Entries []struct {
-			Timestamp    string   `json:"timestamp"`
-			Model        string   `json:"model"`
-			BytesBefore  int      `json:"bytes_before"`
-			BytesAfter   int      `json:"bytes_after"`
-			FiltersRun   []string `json:"filters_run"`
-			SecretsFound int      `json:"secrets_found"`
-			SecretPolicy string   `json:"secret_policy"`
-			Blocked      bool     `json:"blocked"`
+			Timestamp         string                       `json:"timestamp"`
+			Model             string                       `json:"model"`
+			BytesBefore       int                          `json:"bytes_before"`
+			BytesAfter        int                          `json:"bytes_after"`
+			FiltersRun        []string                     `json:"filters_run"`
+			SecretsFound      int                          `json:"secrets_found"`
+			SecretDiagnostics []neurorouter.DetectedSecret `json:"secret_diagnostics"`
+			SecretPolicy      string                       `json:"secret_policy"`
+			Blocked           bool                         `json:"blocked"`
 		} `json:"entries"`
 	}
 	_ = json.Unmarshal(body, &data)
@@ -107,7 +115,21 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 			-savedPct, filters, secrets, blocked); err != nil {
 			return err
 		}
+		if secretReport == secretReportRedacted && len(e.SecretDiagnostics) > 0 {
+			printSecretDiagnostics(out, e.SecretDiagnostics)
+		}
 	}
 
 	return nil
+}
+
+func auditManagementURL(addr, session, secretReport string) string {
+	base := managementURL(addr, "/v1/audit", session)
+	if secretReport != secretReportRedacted {
+		return base
+	}
+	if strings.Contains(base, "?") {
+		return base + "&secret_report=" + secretReport
+	}
+	return base + "?secret_report=" + secretReport
 }
