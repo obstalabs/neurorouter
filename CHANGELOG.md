@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.23] - 2026-04-03
+
+### Added
+- Added an Anthropic Messages passthrough mode so a free NeuroRouter instance can front Claude clients directly via `/v1/messages` while staying pinned to a single protocol surface per instance
+
+### Fixed
+- Removed leaked `ppiankov` identity references from the free repo module path, imports, and CLA metadata after the public repo transfer
+- Removed the stale `stripe-go` dependency from the free repo module graph
+
 ## [0.1.22] - 2026-04-03
 
 ### Fixed
