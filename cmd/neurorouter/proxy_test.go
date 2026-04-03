@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ppiankov/neurorouter/internal/neurorouter"
+	"github.com/obstalabs/neurorouter/internal/neurorouter"
 	"github.com/spf13/cobra"
 )
 

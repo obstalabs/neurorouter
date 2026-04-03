@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/ppiankov/neurorouter/internal/neurorouter"
+	"github.com/obstalabs/neurorouter/internal/neurorouter"
 )
 
 const (

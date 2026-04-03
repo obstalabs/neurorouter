@@ -29,7 +29,7 @@ First-time contributors: comment `I have read the CLA and I agree` on your PR. T
 ## Scope
 
 This CLA covers all contributions to:
-- github.com/ppiankov/neurorouter
+- github.com/obstalabs/neurorouter
 
 ## Questions
 

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ppiankov/neurorouter/internal/neurorouter"
+	"github.com/obstalabs/neurorouter/internal/neurorouter"
 )
 
 func TestTopRecurringFingerprint(t *testing.T) {
