@@ -727,6 +727,106 @@ func TestHandleMessages_AnthropicProtocolAppliesFilters(t *testing.T) {
 	}
 }
 
+func TestHandleMessages_AnthropicProtocolPreservesMixedToolTurnDuringStaleReadCleanup(t *testing.T) {
+	var capturedReq *MessagesRequest
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		req, err := UnmarshalMessagesRequest(body)
+		if err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		capturedReq = req
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet","stop_reason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen:       ":0",
+		ProtocolMode: ProtocolModeAnthropic,
+		Targets: map[string]Target{
+			"default": {BaseURL: upstream.URL, APIKey: "sk-ant-proxy"},
+		},
+		Filters: FilterConfig{
+			Thinking:   true,
+			StaleReads: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := `{
+		"model":"claude-sonnet",
+		"stream":false,
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"internal reasoning"},
+				{"type":"text","text":"Let me check cleanlive.go and find renameOrCopy."},
+				{"type":"tool_use","id":"toolu_grep","name":"Grep","input":{"path":"/repo","pattern":"renameOrCopy","output_mode":"content"}},
+				{"type":"tool_use","id":"toolu_read_old","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":110,"limit":30}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_grep","content":"internal/editor/rename.go:13:func renameOrCopy(src, dst string) error {"},
+				{"type":"tool_result","tool_use_id":"toolu_read_old","content":"old cleanlive snippet"}
+			]},
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"toolu_read_new","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":295,"limit":20}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_read_new","content":"new cleanlive snippet"}
+			]}
+		],
+		"max_tokens":64
+	}`
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", defaultAnthropicAPIVersion)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+	if capturedReq == nil {
+		t.Fatal("expected upstream request to be captured")
+	}
+	if len(capturedReq.Messages) != 4 {
+		t.Fatalf("messages: got %d, want 4", len(capturedReq.Messages))
+	}
+
+	firstAssistant := string(capturedReq.Messages[0].Content)
+	if strings.Contains(firstAssistant, "toolu_read_old") {
+		t.Fatalf("stale read tool_use should not reach upstream: %s", firstAssistant)
+	}
+	if !strings.Contains(firstAssistant, "toolu_grep") {
+		t.Fatalf("live grep tool_use should remain upstream: %s", firstAssistant)
+	}
+
+	firstUser := string(capturedReq.Messages[1].Content)
+	if strings.Contains(firstUser, "toolu_read_old") {
+		t.Fatalf("stale read tool_result should not reach upstream: %s", firstUser)
+	}
+	if !strings.Contains(firstUser, "toolu_grep") {
+		t.Fatalf("live grep tool_result should remain upstream: %s", firstUser)
+	}
+}
+
 func TestProxyStart_RejectsMixedProtocolTargets(t *testing.T) {
 	p := NewProxy(ProxyConfig{
 		Listen: ":0",

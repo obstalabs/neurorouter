@@ -138,6 +138,11 @@ var defaultRules = func() []secretRule {
 // highEntropyRe matches potential tokens: 32+ alphanumeric/special chars.
 var highEntropyRe = regexp.MustCompile(`[A-Za-z0-9/+=_-]{32,}`)
 
+var claudeThinkingTypeRe = regexp.MustCompile(`"type"\s*:\s*"(?:thinking|redacted_thinking)"`)
+var claudeThinkingSignaturePrefixRe = regexp.MustCompile(`"signature"\s*:\s*"$`)
+
+const claudeThinkingSignatureContextBytes = 256
+
 // ScanMessages scans all messages and returns combined results.
 func (s *Scanner) ScanMessages(msgs []ChatMessage) *ProtectResult {
 	var result ProtectResult
@@ -165,6 +170,9 @@ func (s *Scanner) ScanContent(content string) *ProtectResult {
 	// High entropy detection.
 	for _, match := range highEntropyRe.FindAllStringIndex(content, -1) {
 		candidate := content[match[0]:match[1]]
+		if looksLikeClaudeThinkingSignature(content, match[0]) {
+			continue
+		}
 		if isHighEntropySecretCandidate(candidate) {
 			// Skip if already caught by a specific rule.
 			alreadyCaught := false
@@ -233,15 +241,30 @@ func (s *Scanner) redactContent(content string) string {
 	}
 
 	// High entropy.
-	content = highEntropyRe.ReplaceAllStringFunc(content, func(match string) string {
-		if isHighEntropySecretCandidate(match) {
-			counters[SecretHighEntropy]++
-			return "<HIGH_ENTROPY_" + itoa(counters[SecretHighEntropy]) + ">"
-		}
-		return match
-	})
+	matches := highEntropyRe.FindAllStringIndex(content, -1)
+	if len(matches) == 0 {
+		return content
+	}
 
-	return content
+	var rewritten strings.Builder
+	rewritten.Grow(len(content))
+	last := 0
+	for _, match := range matches {
+		start := match[0]
+		end := match[1]
+		candidate := content[start:end]
+		replacement := candidate
+		if !looksLikeClaudeThinkingSignature(content, start) && isHighEntropySecretCandidate(candidate) {
+			counters[SecretHighEntropy]++
+			replacement = "<HIGH_ENTROPY_" + itoa(counters[SecretHighEntropy]) + ">"
+		}
+		rewritten.WriteString(content[last:start])
+		rewritten.WriteString(replacement)
+		last = end
+	}
+	rewritten.WriteString(content[last:])
+
+	return rewritten.String()
 }
 
 func truncateSecret(s string) string {
@@ -322,6 +345,27 @@ func isHighEntropySecretCandidate(s string) bool {
 		return false
 	}
 	return true
+}
+
+func looksLikeClaudeThinkingSignature(content string, start int) bool {
+	if start < 0 || start > len(content) {
+		return false
+	}
+
+	prefixStart := start - 64
+	if prefixStart < 0 {
+		prefixStart = 0
+	}
+	prefix := content[prefixStart:start]
+	if !claudeThinkingSignaturePrefixRe.MatchString(prefix) {
+		return false
+	}
+
+	contextStart := start - claudeThinkingSignatureContextBytes
+	if contextStart < 0 {
+		contextStart = 0
+	}
+	return claudeThinkingTypeRe.MatchString(content[contextStart:start])
 }
 
 func looksLikePathLikeIdentifier(s string) bool {

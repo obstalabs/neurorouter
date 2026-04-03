@@ -169,16 +169,20 @@ func TestFilterOversizedBlocks(t *testing.T) {
 		}
 	})
 
-	t.Run("leaves non-shell tool_result untouched until generic truncation", func(t *testing.T) {
-		large := strings.Repeat("z", 220)
+	t.Run("shapes claude read tool_result while preserving tool identity", func(t *testing.T) {
+		semanticFilter := FilterOversizedBlocks(16 * 1024)
+		large := strings.Repeat("z", 6*1024)
 		msgs := []ChatMessage{
 			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_4","name":"Read","input":{"file_path":"/tmp/x"}}]`},
 			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_4","content":"` + large + `"}]`},
 		}
 
-		out := f(msgs)
+		out := semanticFilter(msgs)
+		if !strings.Contains(out[1].Content, `"tool_use_id":"toolu_4"`) {
+			t.Fatalf("expected tool_use_id to survive shaping, got %s", out[1].Content)
+		}
 		if !strings.Contains(out[1].Content, "[truncated by neurorouter") {
-			t.Fatalf("expected generic truncation fallback, got %s", out[1].Content)
+			t.Fatalf("expected semantic read shaping, got %s", out[1].Content)
 		}
 	})
 }
@@ -211,6 +215,32 @@ func TestFilterThinking(t *testing.T) {
 		}
 		if out[0].Role != "user" {
 			t.Errorf("wrong message kept: %q", out[0].Role)
+		}
+	})
+
+	t.Run("preserves valid claude block arrays with tool_use blocks", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{
+				Role: "assistant",
+				Content: `[{"type":"thinking","thinking":"internal reasoning"},` +
+					`{"type":"text","text":"Let me check cleanlive.go and find renameOrCopy."},` +
+					`{"type":"tool_use","id":"toolu_grep","name":"Grep","input":{"path":"/repo","pattern":"renameOrCopy","output_mode":"content"}},` +
+					`{"type":"tool_use","id":"toolu_read_old","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":110,"limit":30}}]`,
+			},
+		}
+
+		out := FilterThinking(msgs)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(out))
+		}
+		if strings.Contains(out[0].Content, `"type":"thinking"`) {
+			t.Fatalf("thinking block should be removed: %s", out[0].Content)
+		}
+		if !strings.Contains(out[0].Content, "toolu_grep") || !strings.Contains(out[0].Content, "toolu_read_old") {
+			t.Fatalf("tool_use blocks should be preserved: %s", out[0].Content)
+		}
+		if !json.Valid([]byte(out[0].Content)) {
+			t.Fatalf("Claude block array should remain valid JSON: %s", out[0].Content)
 		}
 	})
 }
@@ -281,6 +311,64 @@ func TestFilterStaleReads(t *testing.T) {
 		out := FilterStaleReads(msgs)
 		if len(out) != 3 {
 			t.Fatalf("expected 3 messages (write intervened), got %d", len(out))
+		}
+	})
+
+	t.Run("removes only stale claude read blocks from mixed tool turns", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{
+				Role: "assistant",
+				Content: `[{"type":"text","text":"Let me check cleanlive.go and find renameOrCopy."},` +
+					`{"type":"tool_use","id":"toolu_grep","name":"Grep","input":{"path":"/repo","pattern":"renameOrCopy","output_mode":"content"}},` +
+					`{"type":"tool_use","id":"toolu_read_old","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":110,"limit":30}}]`,
+			},
+			{
+				Role: "user",
+				Content: `[{"type":"tool_result","tool_use_id":"toolu_grep","content":"internal/editor/rename.go:13:func renameOrCopy(src, dst string) error {"},` +
+					`{"type":"tool_result","tool_use_id":"toolu_read_old","content":"old cleanlive snippet"}]`,
+			},
+			{
+				Role:    "assistant",
+				Content: `[{"type":"tool_use","id":"toolu_read_new","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":295,"limit":20}}]`,
+			},
+			{
+				Role:    "user",
+				Content: `[{"type":"tool_result","tool_use_id":"toolu_read_new","content":"new cleanlive snippet"}]`,
+			},
+		}
+
+		out := FilterStaleReads(msgs)
+		if len(out) != 4 {
+			t.Fatalf("expected 4 messages with mixed turn preserved, got %d", len(out))
+		}
+		if strings.Contains(out[0].Content, "toolu_read_old") {
+			t.Fatalf("stale read tool_use should be removed from assistant turn: %s", out[0].Content)
+		}
+		if !strings.Contains(out[0].Content, "toolu_grep") {
+			t.Fatalf("live grep tool_use should remain in assistant turn: %s", out[0].Content)
+		}
+		if strings.Contains(out[1].Content, "toolu_read_old") {
+			t.Fatalf("stale read tool_result should be removed from user turn: %s", out[1].Content)
+		}
+		if !strings.Contains(out[1].Content, "toolu_grep") {
+			t.Fatalf("live grep tool_result should remain in user turn: %s", out[1].Content)
+		}
+	})
+
+	t.Run("drops stale claude read pair when turn contains only the stale read", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_read_old","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":110,"limit":30}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_read_old","content":"old cleanlive snippet"}]`},
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_read_new","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":295,"limit":20}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_read_new","content":"new cleanlive snippet"}]`},
+		}
+
+		out := FilterStaleReads(msgs)
+		if len(out) != 2 {
+			t.Fatalf("expected only the latest read pair to remain, got %d messages", len(out))
+		}
+		if strings.Contains(out[0].Content, "toolu_read_old") || strings.Contains(out[1].Content, "toolu_read_old") {
+			t.Fatalf("stale Claude read pair should be removed: %#v", out)
 		}
 	})
 }

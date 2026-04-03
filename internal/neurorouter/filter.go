@@ -101,21 +101,24 @@ func messageBytes(msgs []ChatMessage) int {
 	return n
 }
 
+const defaultClaudeReadToolResultMaxBytes = 4 * 1024
+
 // FilterOversizedBlocks truncates messages with Content exceeding threshold.
 func FilterOversizedBlocks(threshold int) Filter {
 	return func(msgs []ChatMessage) []ChatMessage {
 		shellTools := claudeShellToolUses(msgs)
+		readTools := claudeReadToolUses(msgs)
 		out := make([]ChatMessage, len(msgs))
 		for i, m := range msgs {
-			if len(m.Content) > threshold {
-				if shaped, changed := shapeClaudeShellToolResultMessage(m.Content, threshold, shellTools); changed {
-					out[i] = ChatMessage{
-						Role:    m.Role,
-						Content: shaped,
-						Source:  m.Source,
-					}
-					continue
+			if shaped, changed := shapeClaudeToolResultMessage(m.Content, threshold, shellTools, readTools); changed {
+				out[i] = ChatMessage{
+					Role:    m.Role,
+					Content: shaped,
+					Source:  m.Source,
 				}
+				continue
+			}
+			if len(m.Content) > threshold {
 				out[i] = ChatMessage{
 					Role:    m.Role,
 					Content: m.Content[:threshold] + "\n[truncated by neurorouter — original " + formatBytes(len(m.Content)) + "]",
@@ -135,6 +138,14 @@ type claudeShellTextField struct {
 }
 
 func claudeShellToolUses(msgs []ChatMessage) map[string]struct{} {
+	return claudeToolUsesWhere(msgs, isClaudeShellToolName)
+}
+
+func claudeReadToolUses(msgs []ChatMessage) map[string]struct{} {
+	return claudeToolUsesWhere(msgs, isClaudeReadToolName)
+}
+
+func claudeToolUsesWhere(msgs []ChatMessage, keep func(string) bool) map[string]struct{} {
 	ids := make(map[string]struct{})
 	for _, m := range msgs {
 		if m.Role != "assistant" {
@@ -151,7 +162,7 @@ func claudeShellToolUses(msgs []ChatMessage) map[string]struct{} {
 				continue
 			}
 			name, err := rawJSONStringValue(block["name"])
-			if err != nil || !isClaudeShellToolName(name) {
+			if err != nil || !keep(name) {
 				continue
 			}
 			id, err := rawJSONStringValue(block["id"])
@@ -173,8 +184,8 @@ func isClaudeShellToolName(name string) bool {
 	}
 }
 
-func shapeClaudeShellToolResultMessage(content string, threshold int, shellTools map[string]struct{}) (string, bool) {
-	if len(shellTools) == 0 {
+func shapeClaudeToolResultMessage(content string, threshold int, shellTools, readTools map[string]struct{}) (string, bool) {
+	if len(shellTools) == 0 && len(readTools) == 0 {
 		return "", false
 	}
 
@@ -193,15 +204,20 @@ func shapeClaudeShellToolResultMessage(content string, threshold int, shellTools
 		if err != nil {
 			continue
 		}
-		if _, ok := shellTools[toolUseID]; !ok {
-			continue
+		switch {
+		case hasClaudeToolUse(shellTools, toolUseID):
+			blockChanged, err := shapeClaudeShellToolResultBlock(block, threshold)
+			if err != nil {
+				continue
+			}
+			changed = changed || blockChanged
+		case hasClaudeToolUse(readTools, toolUseID):
+			blockChanged, err := shapeClaudeReadToolResultBlock(block, claudeReadToolResultBudget(threshold))
+			if err != nil {
+				continue
+			}
+			changed = changed || blockChanged
 		}
-
-		blockChanged, err := shapeClaudeToolResultBlock(block, threshold)
-		if err != nil {
-			continue
-		}
-		changed = changed || blockChanged
 	}
 
 	if !changed {
@@ -215,7 +231,15 @@ func shapeClaudeShellToolResultMessage(content string, threshold int, shellTools
 	return string(rewritten), true
 }
 
-func shapeClaudeToolResultBlock(block map[string]json.RawMessage, threshold int) (bool, error) {
+func hasClaudeToolUse(ids map[string]struct{}, toolUseID string) bool {
+	if len(ids) == 0 {
+		return false
+	}
+	_, ok := ids[toolUseID]
+	return ok
+}
+
+func shapeClaudeShellToolResultBlock(block map[string]json.RawMessage, threshold int) (bool, error) {
 	rawContent, ok := block["content"]
 	if !ok || len(rawContent) == 0 {
 		return false, nil
@@ -272,6 +296,58 @@ func shapeClaudeToolResultBlock(block map[string]json.RawMessage, threshold int)
 		}
 	}
 
+	if !changed {
+		return false, nil
+	}
+	block["content"] = marshalRawValue(parts)
+	return true, nil
+}
+
+func claudeReadToolResultBudget(threshold int) int {
+	budget := defaultClaudeReadToolResultMaxBytes
+	if threshold > 0 && threshold/4 > 0 && threshold/4 < budget {
+		budget = threshold / 4
+	}
+	return budget
+}
+
+func shapeClaudeReadToolResultBlock(block map[string]json.RawMessage, budget int) (bool, error) {
+	if budget <= 0 {
+		return false, nil
+	}
+
+	rawContent, ok := block["content"]
+	if !ok || len(rawContent) == 0 {
+		return false, nil
+	}
+
+	var textValue string
+	if err := json.Unmarshal(rawContent, &textValue); err == nil {
+		if len(textValue) <= budget {
+			return false, nil
+		}
+		block["content"] = marshalRawJSONString(truncateStructuredShellOutput(textValue, budget))
+		return true, nil
+	}
+
+	var parts []map[string]json.RawMessage
+	if err := json.Unmarshal(rawContent, &parts); err != nil {
+		return false, nil
+	}
+
+	changed := false
+	for _, part := range parts {
+		partType, err := rawJSONStringValue(part["type"])
+		if err != nil || partType != "text" {
+			continue
+		}
+		text, err := rawJSONStringValue(part["text"])
+		if err != nil || len(text) <= budget {
+			continue
+		}
+		part["text"] = marshalRawJSONString(truncateStructuredShellOutput(text, budget))
+		changed = true
+	}
 	if !changed {
 		return false, nil
 	}
@@ -407,6 +483,14 @@ var thinkingJSONRe = regexp.MustCompile(`(?s)\{[^}]*"type"\s*:\s*"thinking"[^}]*
 func FilterThinking(msgs []ChatMessage) []ChatMessage {
 	var out []ChatMessage
 	for _, m := range msgs {
+		if rewritten, changed, removeMessage := stripClaudeThinkingBlocks(m.Content); changed {
+			if removeMessage {
+				continue
+			}
+			out = append(out, ChatMessage{Role: m.Role, Content: rewritten, Source: m.Source})
+			continue
+		}
+
 		content := thinkingBlockRe.ReplaceAllString(m.Content, "")
 		content = thinkingJSONRe.ReplaceAllString(content, "")
 		content = strings.TrimSpace(content)
@@ -416,6 +500,41 @@ func FilterThinking(msgs []ChatMessage) []ChatMessage {
 		out = append(out, ChatMessage{Role: m.Role, Content: content, Source: m.Source})
 	}
 	return out
+}
+
+func stripClaudeThinkingBlocks(content string) (string, bool, bool) {
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &blocks); err != nil {
+		return "", false, false
+	}
+
+	rewritten := make([]map[string]json.RawMessage, 0, len(blocks))
+	changed := false
+	for _, block := range blocks {
+		blockType, err := rawJSONStringValue(block["type"])
+		if err != nil {
+			rewritten = append(rewritten, block)
+			continue
+		}
+		if blockType == "thinking" || blockType == "redacted_thinking" {
+			changed = true
+			continue
+		}
+		rewritten = append(rewritten, block)
+	}
+
+	if !changed {
+		return "", false, false
+	}
+	if len(rewritten) == 0 {
+		return "", true, true
+	}
+
+	encoded, err := json.Marshal(rewritten)
+	if err != nil {
+		return "", false, false
+	}
+	return string(encoded), true, false
 }
 
 // systemReminderRe matches <system-reminder>...</system-reminder> blocks.
@@ -510,49 +629,224 @@ var writeToolRe = regexp.MustCompile(`"name"\s*:\s*"(?:Write|Edit|write_file|Wri
 
 // FilterStaleReads removes messages containing file reads where the same file
 // was read again later without an intervening write.
+type staleReadEvent struct {
+	msgIdx    int
+	toolUseID string
+}
+
+type claudeToolUseEvent struct {
+	id      string
+	path    string
+	isRead  bool
+	isWrite bool
+}
+
 func FilterStaleReads(msgs []ChatMessage) []ChatMessage {
-	lastRead := make(map[string][]int) // path → list of message indices with reads
+	lastRead := make(map[string][]staleReadEvent) // path → list of read events
 
 	// First pass: collect all read and write events.
 	writes := make(map[string]int) // path → latest write index
 	for i, m := range msgs {
+		if events, parsed := claudeToolUseEvents(m.Content); parsed {
+			for _, event := range events {
+				if event.path == "" {
+					continue
+				}
+				if event.isWrite {
+					writes[event.path] = i
+				}
+				if event.isRead {
+					lastRead[event.path] = append(lastRead[event.path], staleReadEvent{
+						msgIdx:    i,
+						toolUseID: event.id,
+					})
+				}
+			}
+			continue
+		}
 		for _, match := range writeToolRe.FindAllStringSubmatch(m.Content, -1) {
 			writes[match[1]] = i
 		}
 		for _, match := range readToolRe.FindAllStringSubmatch(m.Content, -1) {
-			lastRead[match[1]] = append(lastRead[match[1]], i)
+			lastRead[match[1]] = append(lastRead[match[1]], staleReadEvent{msgIdx: i})
 		}
 	}
 
 	// Determine which message indices to drop.
 	drop := make(map[int]bool)
-	for path, indices := range lastRead {
-		if len(indices) <= 1 {
+	staleToolUseIDs := make(map[string]struct{})
+	for path, events := range lastRead {
+		if len(events) <= 1 {
 			continue
 		}
 		latestWrite, hasWrite := writes[path]
 		// Keep only the last read. Drop earlier reads unless a write occurred after them.
-		last := indices[len(indices)-1]
-		for _, idx := range indices[:len(indices)-1] {
-			if hasWrite && latestWrite > idx && latestWrite < last {
+		last := events[len(events)-1]
+		for _, event := range events[:len(events)-1] {
+			if hasWrite && latestWrite > event.msgIdx && latestWrite < last.msgIdx {
 				// Write occurred between this read and the last read — keep this read.
 				continue
 			}
-			drop[idx] = true
+			if event.toolUseID != "" {
+				staleToolUseIDs[event.toolUseID] = struct{}{}
+				continue
+			}
+			drop[event.msgIdx] = true
 		}
 	}
 
-	if len(drop) == 0 {
+	if len(drop) == 0 && len(staleToolUseIDs) == 0 {
 		return msgs
 	}
 
-	out := make([]ChatMessage, 0, len(msgs)-len(drop))
+	out := make([]ChatMessage, 0, len(msgs))
 	for i, m := range msgs {
-		if !drop[i] {
-			out = append(out, m)
+		if drop[i] {
+			continue
 		}
+
+		content := m.Content
+		if len(staleToolUseIDs) > 0 {
+			rewritten, changed, removeMessage := stripClaudeStaleReadBlocks(m.Role, content, staleToolUseIDs)
+			if removeMessage {
+				continue
+			}
+			if changed {
+				content = rewritten
+			}
+		}
+		out = append(out, ChatMessage{Role: m.Role, Content: content, Source: m.Source})
 	}
 	return out
+}
+
+func claudeToolUseEvents(content string) ([]claudeToolUseEvent, bool) {
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &blocks); err != nil {
+		return nil, false
+	}
+
+	events := make([]claudeToolUseEvent, 0, len(blocks))
+	for _, block := range blocks {
+		blockType, err := rawJSONStringValue(block["type"])
+		if err != nil || blockType != "tool_use" {
+			continue
+		}
+		name, err := rawJSONStringValue(block["name"])
+		if err != nil {
+			continue
+		}
+
+		isRead := isClaudeReadToolName(name)
+		isWrite := isClaudeWriteToolName(name)
+		if !isRead && !isWrite {
+			continue
+		}
+
+		id, _ := rawJSONStringValue(block["id"])
+		path := claudeToolPath(block["input"])
+		if path == "" {
+			continue
+		}
+
+		events = append(events, claudeToolUseEvent{
+			id:      id,
+			path:    path,
+			isRead:  isRead,
+			isWrite: isWrite,
+		})
+	}
+	return events, true
+}
+
+func claudeToolPath(rawInput json.RawMessage) string {
+	if len(rawInput) == 0 {
+		return ""
+	}
+	var input map[string]json.RawMessage
+	if err := json.Unmarshal(rawInput, &input); err != nil {
+		return ""
+	}
+	if path, err := rawJSONStringValue(input["file_path"]); err == nil && path != "" {
+		return path
+	}
+	if path, err := rawJSONStringValue(input["path"]); err == nil && path != "" {
+		return path
+	}
+	return ""
+}
+
+func isClaudeReadToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "read", "read_file", "view", "readfile":
+		return true
+	default:
+		return false
+	}
+}
+
+func isClaudeWriteToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "write", "edit", "write_file", "writefile", "notebookedit":
+		return true
+	default:
+		return false
+	}
+}
+
+func stripClaudeStaleReadBlocks(role, content string, staleToolUseIDs map[string]struct{}) (string, bool, bool) {
+	if role != "assistant" && role != "user" {
+		return "", false, false
+	}
+
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &blocks); err != nil {
+		return "", false, false
+	}
+
+	rewritten := make([]map[string]json.RawMessage, 0, len(blocks))
+	changed := false
+	for _, block := range blocks {
+		blockType, err := rawJSONStringValue(block["type"])
+		if err != nil {
+			rewritten = append(rewritten, block)
+			continue
+		}
+
+		switch {
+		case role == "assistant" && blockType == "tool_use":
+			id, err := rawJSONStringValue(block["id"])
+			if err == nil {
+				if _, ok := staleToolUseIDs[id]; ok {
+					changed = true
+					continue
+				}
+			}
+		case role == "user" && blockType == "tool_result":
+			id, err := rawJSONStringValue(block["tool_use_id"])
+			if err == nil {
+				if _, ok := staleToolUseIDs[id]; ok {
+					changed = true
+					continue
+				}
+			}
+		}
+
+		rewritten = append(rewritten, block)
+	}
+
+	if !changed {
+		return "", false, false
+	}
+	if len(rewritten) == 0 {
+		return "", true, true
+	}
+
+	encoded, err := json.Marshal(rewritten)
+	if err != nil {
+		return "", false, false
+	}
+	return string(encoded), true, false
 }
 
 // toolUseIDRe extracts tool_use IDs from assistant messages.

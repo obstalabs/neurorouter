@@ -188,6 +188,17 @@ func TestScanner_HighEntropyIgnoresPathLikeIdentifiers(t *testing.T) {
 	}
 }
 
+func TestScanner_HighEntropyIgnoresClaudeThinkingSignatures(t *testing.T) {
+	s := NewScanner()
+	signature := buildSecret("EoYCClkIDBgC", "AbCdEfGhIjKlMnOpQrStUvWxYz1234567890")
+	content := `[{"type":"thinking","thinking":"internal reasoning","signature":"` + signature + `"}]`
+
+	result := s.ScanContent(content)
+	if result.HasSecrets {
+		t.Fatalf("expected thinking signature to be ignored, got %v", result.Secrets)
+	}
+}
+
 func TestScanner_RedactMessages(t *testing.T) {
 	s := NewScanner()
 	awsKey := buildSecret("AKIA", "IOSFODNN7EXAMPL", "E")
