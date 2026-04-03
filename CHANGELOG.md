@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.26] - 2026-04-03
+
+### Changed
+- Clarified the community-edition session boundary for Claude Code and Codex, including the safe operational rule of one proxy instance per live session unless the client can provide a stable session selector
+
 ## [0.1.25] - 2026-04-03
 
 ### Fixed
