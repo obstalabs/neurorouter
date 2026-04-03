@@ -51,6 +51,7 @@ type ProxyConfig struct {
 	Listen                  string // defaults to 127.0.0.1:4000
 	AllowPublicListen       bool   // require explicit opt-in for non-loopback binds
 	ExposeManagement        bool   // expose audit/suggestions on public binds
+	ProtocolMode            ProtocolMode
 	Capabilities            map[string]TargetCapabilities
 	Targets                 map[string]Target       // model name → single target (backward compat)
 	TargetPool              map[string][]PoolTarget // model name → multiple targets with load balancing
@@ -141,16 +142,26 @@ func (p *Proxy) Start() (string, error) {
 	if publicBind && !p.cfg.AllowPublicListen {
 		return "", fmt.Errorf("public listen %s requires explicit opt-in", listenAddr)
 	}
+	protocolMode, err := ResolveProtocolMode(p.cfg)
+	if err != nil {
+		return "", err
+	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /models", p.handleModels)
-	mux.HandleFunc("GET /v1/models", p.handleModels)
-	mux.HandleFunc("GET /v1/responses", p.handleResponsesWebsocket)
-	mux.HandleFunc("GET /responses", p.handleResponsesWebsocket)
-	mux.HandleFunc("POST /v1/responses", p.handleResponses)
-	mux.HandleFunc("POST /responses", p.handleResponses)
-	mux.HandleFunc("POST /v1/responses/compact", p.handleResponsesCompact)
-	mux.HandleFunc("POST /responses/compact", p.handleResponsesCompact)
+	switch protocolMode {
+	case ProtocolModeAnthropic:
+		mux.HandleFunc("POST /v1/messages", p.handleMessages)
+		mux.HandleFunc("POST /messages", p.handleMessages)
+	default:
+		mux.HandleFunc("GET /models", p.handleModels)
+		mux.HandleFunc("GET /v1/models", p.handleModels)
+		mux.HandleFunc("GET /v1/responses", p.handleResponsesWebsocket)
+		mux.HandleFunc("GET /responses", p.handleResponsesWebsocket)
+		mux.HandleFunc("POST /v1/responses", p.handleResponses)
+		mux.HandleFunc("POST /responses", p.handleResponses)
+		mux.HandleFunc("POST /v1/responses/compact", p.handleResponsesCompact)
+		mux.HandleFunc("POST /responses/compact", p.handleResponsesCompact)
+	}
 	mux.HandleFunc("/health", p.handleHealth)
 	if !publicBind || p.cfg.ExposeManagement {
 		mux.HandleFunc("/v1/suggestions", p.handleSuggestions)
@@ -175,7 +186,7 @@ func (p *Proxy) Start() (string, error) {
 		}
 	}()
 
-	slog.Info("proxy started", "addr", p.addr, "targets", len(p.cfg.Targets))
+	slog.Info("proxy started", "addr", p.addr, "targets", len(p.cfg.Targets), "protocol", protocolMode)
 	return p.addr, nil
 }
 
@@ -477,6 +488,206 @@ func (p *Proxy) handleResponsesCompact(w http.ResponseWriter, r *http.Request) {
 	p.handleResponsesForUpstream(w, r, "/v1/responses/compact", true)
 }
 
+func (p *Proxy) handleMessages(w http.ResponseWriter, r *http.Request) {
+	rawBody, err := readDecodedRequestBody(r)
+	if err != nil {
+		var decodeErr *requestBodyError
+		if errors.As(err, &decodeErr) {
+			writeError(w, decodeErr.StatusCode, decodeErr.Message)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "read request body: "+err.Error())
+		return
+	}
+
+	runtime := p.runtimeForSession(requestSessionKey(r, rawBody))
+
+	req, err := UnmarshalMessagesRequest(rawBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if runtime.dnd != nil {
+		runtime.dnd.RecordRequest()
+	}
+
+	selection, err := p.resolveTarget(req.Model, RequestRequirements{Streaming: req.Stream})
+	if err != nil {
+		var capabilityErr *CapabilityError
+		if errors.As(err, &capabilityErr) {
+			writeError(w, http.StatusBadRequest, capabilityErr.Error())
+			return
+		}
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
+
+	requestMsgs, err := ExtractAnthropicMessages(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "extract request messages: "+err.Error())
+		return
+	}
+	filteredMsgs := append([]ChatMessage(nil), requestMsgs...)
+	originalMsgs := append([]ChatMessage(nil), requestMsgs...)
+
+	var (
+		pipeResult *PipelineResult
+		rewrite    *AnthropicMessagesRewriteResult
+	)
+
+	if runtime.pipeline != nil {
+		adapter := ClaudeAdapter{}
+		filteredMsgs, pipeResult, err = runtime.pipeline.Process(filteredMsgs, adapter)
+		if err != nil {
+			if runtime.audit != nil && pipeResult != nil {
+				runtime.audit.Record(AuditEntry{
+					Timestamp:         timeNow(),
+					Model:             req.Model,
+					BytesBefore:       pipeResult.BytesBefore,
+					BytesAfter:        0,
+					BytesRemoved:      pipeResult.BytesBefore,
+					SecretsFound:      pipeResult.SecretsFound,
+					SecretDiagnostics: cloneDetectedSecrets(pipeResult.SecretDiagnostics),
+					SecretPolicy:      string(pipeResult.SecretPolicy),
+					Blocked:           true,
+				})
+			}
+			if runtime.dnd != nil {
+				runtime.dnd.RecordError()
+			}
+			writeError(w, http.StatusForbidden, "request blocked: "+err.Error())
+			return
+		}
+		if pipeResult.SecretsFound > 0 && pipeResult.SecretPolicy == PolicyWarn {
+			w.Header().Set("X-Neurorouter-Secrets-Detected", fmt.Sprintf("%d", pipeResult.SecretsFound))
+		}
+
+		rewrite, err = RewriteAnthropicMessagesRequest(rawBody, originalMsgs, filteredMsgs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "rewrite anthropic request: "+err.Error())
+			return
+		}
+		pipeResult.BytesBefore = rewrite.BytesBefore
+		pipeResult.BytesAfter = rewrite.BytesAfter
+
+		suggestions := p.filteredSuggestions(runtime)
+		if len(suggestions) > 0 {
+			w.Header().Set("X-Neurorouter-Suggestions", fmt.Sprintf("%d", len(suggestions)))
+		}
+
+		if runtime.audit != nil {
+			runtime.audit.Record(AuditEntry{
+				Timestamp:         timeNow(),
+				Model:             req.Model,
+				BytesBefore:       pipeResult.BytesBefore,
+				BytesAfter:        pipeResult.BytesAfter,
+				BytesRemoved:      pipeResult.BytesBefore - pipeResult.BytesAfter,
+				FiltersRun:        pipeResult.FiltersRun,
+				SecretsFound:      pipeResult.SecretsFound,
+				SecretDiagnostics: cloneDetectedSecrets(pipeResult.SecretDiagnostics),
+				SecretPolicy:      string(pipeResult.SecretPolicy),
+			})
+		}
+
+		if p.cfg.OnRequest != nil {
+			p.cfg.OnRequest(RequestEvent{
+				Model:             req.Model,
+				BytesBefore:       pipeResult.BytesBefore,
+				BytesAfter:        pipeResult.BytesAfter,
+				FiltersRun:        pipeResult.FiltersRun,
+				SecretsFound:      pipeResult.SecretsFound,
+				SecretDiagnostics: cloneDetectedSecrets(pipeResult.SecretDiagnostics),
+			})
+		}
+	}
+
+	if rewrite == nil {
+		rewrite, err = RewriteAnthropicMessagesRequest(rawBody, originalMsgs, filteredMsgs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "rewrite anthropic request: "+err.Error())
+			return
+		}
+	}
+
+	if p.cfg.DryRun {
+		result := DryRunResult{
+			Original: originalMsgs,
+			Filtered: filteredMsgs,
+		}
+		if pipeResult != nil {
+			result.BytesBefore = pipeResult.BytesBefore
+			result.BytesAfter = pipeResult.BytesAfter
+			result.BytesRemoved = pipeResult.BytesBefore - pipeResult.BytesAfter
+			result.FiltersRun = pipeResult.FiltersRun
+			result.SecretsFound = pipeResult.SecretsFound
+		} else {
+			result.BytesBefore = rewrite.BytesBefore
+			result.BytesAfter = rewrite.BytesAfter
+			result.BytesRemoved = rewrite.BytesBefore - rewrite.BytesAfter
+		}
+		w.Header().Set("Content-Type", "application/json")
+		data, _ := json.Marshal(result)
+		_, _ = w.Write(data)
+		return
+	}
+
+	upstreamURL := strings.TrimRight(selection.Target.BaseURL, "/") + "/v1/messages"
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(rewrite.Body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create upstream request: "+err.Error())
+		return
+	}
+	upReq.Header.Set("Content-Type", "application/json")
+	forwardAnthropicHeaders(upReq.Header, r.Header)
+	if upReq.Header.Get("anthropic-version") == "" {
+		upReq.Header.Set("anthropic-version", defaultAnthropicAPIVersion)
+	}
+
+	if selection.Target.APIKey != "" {
+		upReq.Header.Set("x-api-key", selection.Target.APIKey)
+		upReq.Header.Del("Authorization")
+	} else {
+		forwardAnthropicClientAuth(upReq.Header, r.Header)
+	}
+
+	slog.Debug("proxy forwarding", "model", req.Model, "provider", "anthropic", "upstream", upstreamURL, "stream", req.Stream)
+
+	upResp, err := p.client.Do(upReq)
+	if err != nil {
+		p.health.RecordFailure(selection.Target.BaseURL)
+		if runtime.dnd != nil {
+			runtime.dnd.RecordError()
+		}
+		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		return
+	}
+	defer func() { _ = upResp.Body.Close() }()
+
+	if upResp.StatusCode >= 500 {
+		p.health.RecordFailure(selection.Target.BaseURL)
+	} else {
+		p.health.RecordSuccess(selection.Target.BaseURL)
+	}
+
+	if upResp.StatusCode >= 400 {
+		if runtime.dnd != nil {
+			runtime.dnd.RecordError()
+		}
+		if contentType := upResp.Header.Get("Content-Type"); contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		w.WriteHeader(upResp.StatusCode)
+		_, _ = io.Copy(w, upResp.Body)
+		return
+	}
+
+	if req.Stream {
+		p.handlePassthroughStreamingResponse(w, upResp, nil)
+		return
+	}
+	p.handlePassthroughResponse(w, upResp, nil)
+}
+
 func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Request, nativeUpstreamPath string, requireNativeResponses bool) {
 	rawBody, err := readDecodedRequestBody(r)
 	if err != nil {
@@ -741,6 +952,27 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 func forwardCodexTurnState(dst, src http.Header) {
 	if turnState := src.Get(codexTurnStateHeader); turnState != "" {
 		dst.Set(codexTurnStateHeader, turnState)
+	}
+}
+
+func forwardAnthropicHeaders(dst, src http.Header) {
+	if version := src.Get("anthropic-version"); version != "" {
+		dst.Set("anthropic-version", version)
+	}
+	if beta := src.Get("anthropic-beta"); beta != "" {
+		dst.Set("anthropic-beta", beta)
+	}
+	if directBrowser := src.Get("anthropic-dangerous-direct-browser-access"); directBrowser != "" {
+		dst.Set("anthropic-dangerous-direct-browser-access", directBrowser)
+	}
+}
+
+func forwardAnthropicClientAuth(dst, src http.Header) {
+	if apiKey := src.Get("x-api-key"); apiKey != "" {
+		dst.Set("x-api-key", apiKey)
+	}
+	if auth := src.Get("Authorization"); auth != "" {
+		dst.Set("Authorization", auth)
 	}
 }
 

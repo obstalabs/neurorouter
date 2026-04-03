@@ -635,6 +635,116 @@ func TestHandleResponses_AnthropicMessagesPathNotExposed(t *testing.T) {
 	}
 }
 
+func TestHandleMessages_AnthropicProtocolAppliesFilters(t *testing.T) {
+	var (
+		capturedAuth    string
+		capturedVersion string
+		capturedReq     *MessagesRequest
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		capturedAuth = r.Header.Get("x-api-key")
+		capturedVersion = r.Header.Get("anthropic-version")
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		req, err := UnmarshalMessagesRequest(body)
+		if err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		capturedReq = req
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet","stop_reason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen:       ":0",
+		ProtocolMode: ProtocolModeAnthropic,
+		Targets: map[string]Target{
+			"default": {BaseURL: upstream.URL, APIKey: "sk-ant-proxy"},
+		},
+		Filters: FilterConfig{
+			Thinking: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	body := `{"model":"claude-sonnet","system":"be concise","stream":false,"messages":[{"role":"assistant","content":"<thinking>internal</thinking>Visible answer"},{"role":"user","content":"hello"}],"max_tokens":64}`
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", defaultAnthropicAPIVersion)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(b))
+	}
+	if capturedReq == nil {
+		t.Fatal("expected upstream request to be captured")
+	}
+	if capturedAuth != "sk-ant-proxy" {
+		t.Fatalf("x-api-key: got %q", capturedAuth)
+	}
+	if capturedVersion != defaultAnthropicAPIVersion {
+		t.Fatalf("anthropic-version: got %q", capturedVersion)
+	}
+	if got := string(capturedReq.System); got != `"be concise"` {
+		t.Fatalf("system: got %s", got)
+	}
+	if len(capturedReq.Messages) != 2 {
+		t.Fatalf("messages: got %d, want 2", len(capturedReq.Messages))
+	}
+	if got := strings.Trim(string(capturedReq.Messages[0].Content), `"`); got != "Visible answer" {
+		t.Fatalf("assistant content: got %q", got)
+	}
+
+	notFoundResp, err := http.Post("http://"+addr+"/v1/responses", "application/json", strings.NewReader(`{"model":"claude-sonnet","input":[{"type":"message","role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("responses request: %v", err)
+	}
+	defer func() { _ = notFoundResp.Body.Close() }()
+	if notFoundResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("/v1/responses status: got %d, want %d", notFoundResp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestProxyStart_RejectsMixedProtocolTargets(t *testing.T) {
+	p := NewProxy(ProxyConfig{
+		Listen: ":0",
+		Targets: map[string]Target{
+			"default": {BaseURL: "https://api.openai.com"},
+			"claude":  {BaseURL: "https://api.anthropic.com"},
+		},
+	})
+
+	_, err := p.Start()
+	if err == nil {
+		t.Fatal("expected mixed protocol targets to fail")
+	}
+	if !strings.Contains(err.Error(), "neurorouter-pro") {
+		t.Fatalf("error: got %v", err)
+	}
+}
+
 func TestHandleResponses_Streaming(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher := w.(http.Flusher)
@@ -4514,7 +4624,8 @@ func TestHandleResponses_ClaudeAdapterKeepsThinkingFilterLive(t *testing.T) {
 	defer upstream.Close()
 
 	p := NewProxy(ProxyConfig{
-		Listen: ":0",
+		Listen:       ":0",
+		ProtocolMode: ProtocolModeOpenAI,
 		Targets: map[string]Target{
 			"claude-sonnet": {BaseURL: upstream.URL},
 		},

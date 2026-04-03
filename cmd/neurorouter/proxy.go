@@ -44,6 +44,7 @@ var proxyCmd = &cobra.Command{
 type proxyRuntimeSettings struct {
 	Listen                  string
 	Target                  string
+	Protocol                string
 	APIKey                  string
 	SecretReport            string
 	DangerousSecretReveal   bool
@@ -66,6 +67,7 @@ func addProxyFlags(cmd *cobra.Command) {
 	f.Bool("public", false, "allow binding the proxy to a non-loopback interface")
 	f.Bool("expose-management", false, "expose /v1/audit and /v1/suggestions on public binds")
 	f.String("target", "", "upstream URL (auto-detected from API key env vars if omitted)")
+	f.String("protocol", "auto", "public client protocol surface: auto, openai, anthropic")
 	f.String("api-key", "", "API key (or env:VAR_NAME; auto-detected if omitted)")
 	f.Bool("client-auth", false, "forward client Authorization header instead of auto-configuring proxy auth")
 	f.String("protect-policy", "warn", "secret policy: block, redact, warn")
@@ -106,6 +108,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	publicBind := settings.PublicBind
 	exposeManagement := settings.ExposeManagement
 	target := settings.Target
+	protocol := settings.Protocol
 	apiKey := settings.APIKey
 	secretReport := settings.SecretReport
 	dangerousSecretReveal := settings.DangerousSecretReveal
@@ -146,6 +149,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		Listen:            listen,
 		AllowPublicListen: publicBind,
 		ExposeManagement:  exposeManagement,
+		ProtocolMode:      neurorouter.ProtocolMode(protocol),
 		Targets: map[string]neurorouter.Target{
 			"default": {BaseURL: target, APIKey: apiKey},
 		},
@@ -171,6 +175,11 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 
 	if !noCache {
 		cfg.Neurocache = neurorouter.NeurocacheConfig{Enabled: true}
+	}
+
+	resolvedProtocol, err := neurorouter.ResolveProtocolMode(cfg)
+	if err != nil {
+		return err
 	}
 
 	// Session tracking for first-run and shutdown summary.
@@ -225,6 +234,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintf(os.Stderr, "neurorouter listening on %s\n", addr)
 	fmt.Fprintf(os.Stderr, "  target:  %s\n", startupTargetLabel(target, detected.TargetProvider))
+	fmt.Fprintf(os.Stderr, "  protocol: %s\n", resolvedProtocol)
 	fmt.Fprintf(os.Stderr, "  protect: %v (policy: %s)\n", !noProtect, protectPolicy)
 	if dangerousSecretReveal {
 		fmt.Fprintf(os.Stderr, "  DANGER: full matched secret values will be stored in memory for local debugging and can be revealed in cleartext\n")
@@ -254,7 +264,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	if dryRun {
 		fmt.Fprintf(os.Stderr, "  dry-run: enabled (requests will NOT be forwarded)\n")
 	}
-	fmt.Fprint(os.Stderr, startupClientHint(addr, target, detected.TargetProvider))
+	fmt.Fprint(os.Stderr, startupClientHint(addr, resolvedProtocol))
 	fmt.Fprintf(os.Stderr, "Waiting for requests...\n")
 
 	sig := make(chan os.Signal, 1)
@@ -423,26 +433,13 @@ func startupAuthMode(rawAPIKeySetting, resolvedAPIKey, keyProvider string, clien
 	return "configured on proxy"
 }
 
-func startupClientHint(addr, target, detectedProvider string) string {
-	family := startupClientFamily(target, detectedProvider)
-
-	switch family {
-	case "anthropic":
+func startupClientHint(addr string, protocol neurorouter.ProtocolMode) string {
+	switch protocol {
+	case neurorouter.ProtocolModeAnthropic:
 		return fmt.Sprintf("\nTo use with Claude Code:\n  export ANTHROPIC_BASE_URL=http://%s\n\n", addr)
 	default:
 		return fmt.Sprintf("\nTo use with Codex or another Responses-compatible client:\n  export OPENAI_BASE_URL=http://%s\n  # for Codex, prefer a provider profile with wire_api=responses\n\n", addr)
 	}
-}
-
-func startupClientFamily(target, detectedProvider string) string {
-	lowerTarget := strings.ToLower(target)
-	lowerProvider := strings.ToLower(detectedProvider)
-
-	if strings.Contains(lowerProvider, "anthropic") || strings.Contains(lowerTarget, "anthropic") {
-		return "anthropic"
-	}
-
-	return "responses"
 }
 
 func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRuntimeSettings, error) {
@@ -453,6 +450,7 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 	settings := proxyRuntimeSettings{
 		Listen:                  listenAddressForPort(cfg.ListenPort),
 		Target:                  cfg.Upstream,
+		Protocol:                flagString(cmd, "protocol"),
 		ProtectPolicy:           cfg.ProtectPolicy,
 		InputPricePerMillionUSD: cfg.InputPricePerMillionUSD,
 		APIKey:                  flagString(cmd, "api-key"),
@@ -475,9 +473,17 @@ func resolveProxySettings(cmd *cobra.Command, cfg *neurorouter.Config) (proxyRun
 	if cmd.Flags().Changed("target") {
 		settings.Target = flagString(cmd, "target")
 	}
+	if cmd.Flags().Changed("protocol") {
+		settings.Protocol = flagString(cmd, "protocol")
+	}
 	if cmd.Flags().Changed("protect-policy") {
 		settings.ProtectPolicy = flagString(cmd, "protect-policy")
 	}
+	protocolMode, err := neurorouter.ParseProtocolMode(settings.Protocol)
+	if err != nil {
+		return proxyRuntimeSettings{}, err
+	}
+	settings.Protocol = string(protocolMode)
 	secretReport, err := normalizeSecretReportMode(settings.SecretReport, settings.DangerousSecretReveal)
 	if err != nil {
 		return proxyRuntimeSettings{}, err

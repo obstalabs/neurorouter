@@ -21,6 +21,9 @@ func TestProxyFlagDefaults(t *testing.T) {
 	if got := cmd.Flags().Lookup("listen").DefValue; got != neurorouter.DefaultListenAddress {
 		t.Fatalf("listen default: got %q, want %q", got, neurorouter.DefaultListenAddress)
 	}
+	if got := cmd.Flags().Lookup("protocol").DefValue; got != "auto" {
+		t.Fatalf("protocol default: got %q, want auto", got)
+	}
 	if got := cmd.Flags().Lookup("public").DefValue; got != "false" {
 		t.Fatalf("public default: got %q, want false", got)
 	}
@@ -57,6 +60,9 @@ func TestResolveProxySettings_Defaults(t *testing.T) {
 	}
 	if settings.Target != "" {
 		t.Fatalf("target: got %q, want empty", settings.Target)
+	}
+	if settings.Protocol != string(neurorouter.ProtocolModeAuto) {
+		t.Fatalf("protocol: got %q, want auto", settings.Protocol)
 	}
 	if settings.ShellMaxBytes != 0 {
 		t.Fatalf("shell max bytes: got %d, want 0", settings.ShellMaxBytes)
@@ -141,6 +147,7 @@ func TestResolveProxySettings_FlagsOverrideLoadedConfig(t *testing.T) {
 	cmd := newProxyTestCommand()
 	mustSetFlag(t, cmd, "listen", "localhost:7000")
 	mustSetFlag(t, cmd, "target", "https://flag.example")
+	mustSetFlag(t, cmd, "protocol", "anthropic")
 	mustSetFlag(t, cmd, "protect-policy", "warn")
 	mustSetFlag(t, cmd, "secret-report", "redacted")
 	mustSetFlag(t, cmd, "shell-max-output-bytes", "32768")
@@ -155,6 +162,9 @@ func TestResolveProxySettings_FlagsOverrideLoadedConfig(t *testing.T) {
 	}
 	if settings.Target != "https://flag.example" {
 		t.Fatalf("target: got %q", settings.Target)
+	}
+	if settings.Protocol != string(neurorouter.ProtocolModeAnthropic) {
+		t.Fatalf("protocol: got %q", settings.Protocol)
 	}
 	if settings.ProtectPolicy != "warn" {
 		t.Fatalf("protect policy: got %q", settings.ProtectPolicy)
@@ -176,6 +186,15 @@ func TestResolveProxySettings_RejectsInvalidSecretReport(t *testing.T) {
 
 	if _, err := resolveProxySettings(cmd, neurorouter.DefaultConfig()); err == nil {
 		t.Fatal("expected full secret-report without dangerous flag to fail")
+	}
+}
+
+func TestResolveProxySettings_RejectsInvalidProtocol(t *testing.T) {
+	cmd := newProxyTestCommand()
+	mustSetFlag(t, cmd, "protocol", "bedrock")
+
+	if _, err := resolveProxySettings(cmd, neurorouter.DefaultConfig()); err == nil {
+		t.Fatal("expected invalid protocol to fail")
 	}
 }
 
@@ -441,7 +460,7 @@ func TestAutoDetectProviderSettings(t *testing.T) {
 
 func TestStartupClientHint(t *testing.T) {
 	t.Run("responses hint for openai", func(t *testing.T) {
-		got := startupClientHint("127.0.0.1:4010", "https://api.openai.com", "OpenAI")
+		got := startupClientHint("127.0.0.1:4010", neurorouter.ProtocolModeOpenAI)
 		if !strings.Contains(got, "Codex or another Responses-compatible client") {
 			t.Fatalf("missing responses hint: %q", got)
 		}
@@ -451,7 +470,7 @@ func TestStartupClientHint(t *testing.T) {
 	})
 
 	t.Run("claude hint for anthropic", func(t *testing.T) {
-		got := startupClientHint("127.0.0.1:4010", "https://api.anthropic.com", "Anthropic")
+		got := startupClientHint("127.0.0.1:4010", neurorouter.ProtocolModeAnthropic)
 		if !strings.Contains(got, "To use with Claude Code") {
 			t.Fatalf("missing Claude hint: %q", got)
 		}

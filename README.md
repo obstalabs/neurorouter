@@ -17,13 +17,12 @@ Or download from [releases](https://github.com/obstalabs/neurorouter/releases/la
 ## Quick start
 
 ```bash
-# Start the proxy
-neurorouter
-
-# Point Claude Code at it
+# Claude mode
+neurorouter proxy --target https://api.anthropic.com --api-key env:ANTHROPIC_API_KEY
 ANTHROPIC_BASE_URL=http://localhost:4000 claude
 
-# Point current Codex at it
+# Codex / OpenAI mode
+neurorouter proxy --target https://api.openai.com --api-key env:OPENAI_API_KEY
 codex -c 'openai_base_url="http://127.0.0.1:4000"'
 
 # See what would be filtered without sending
@@ -31,6 +30,8 @@ neurorouter --dry-run
 ```
 
 By default NeuroRouter listens on `127.0.0.1:4000`. If you really need remote clients, opt in explicitly with `neurorouter --public --listen 0.0.0.0:4000`. On public binds, `/v1/audit` and `/v1/suggestions` stay disabled unless you also pass `--expose-management`.
+
+The community edition exposes one client protocol per instance. Point it at Anthropic and it serves `/v1/messages` for Claude Code. Point it at OpenAI-compatible upstreams and it serves the current Responses-native Codex surface. If you need both Claude and Codex at once, run two instances on different ports.
 
 For Codex, the recommended setup is a provider profile that makes the wire mode explicit:
 
@@ -59,7 +60,7 @@ Universal filters such as `oversized_blocks` and `stale_reads` apply across prov
 
 **Preserve semantics** — Codex/OpenAI clients can stay on the native Responses wire path when the selected upstream supports it. For simpler text-only requests against Chat Completions targets, NeuroRouter can still fall back to compatibility translation.
 
-Verified in the community edition for Responses-native clients such as Codex. See [docs/compatibility.md](docs/compatibility.md) for the current test-backed client-path matrix and current auth boundary.
+Verified in the community edition for OpenAI/Codex Responses mode and Anthropic Messages mode, one protocol surface per instance. See [docs/compatibility.md](docs/compatibility.md) for the current test-backed client-path matrix and current auth boundary.
 
 ## Licensing Model
 
@@ -82,9 +83,11 @@ Included in this free community edition:
 - DND suppression controls
 - provider adapters and compatibility routing
 - native Responses passthrough for compatible upstreams
+- Anthropic Messages passthrough for Claude Code-compatible upstreams
 - local config and CLI workflow
 
 Paid or private-only features do not live in this repository. Those include:
+- one-process multi-client hubs that serve Claude and Codex at the same time
 - premium task-routing and cascade logic
 - runaway detection and pre-cooldown guidance
 - context rescue and checkpoint tooling
