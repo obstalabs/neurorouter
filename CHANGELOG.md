@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.22] - 2026-04-03
+
+### Fixed
+- Native Responses replay cleanup now preserves assistant `output_text` history on compact and resume paths while still normalizing user, system, and developer replay text to `input_text`, so Codex sessions can continue through NeuroRouter without schema errors on replayed assistant turns
+
 ## [0.1.21] - 2026-04-01
 
 ### Fixed
