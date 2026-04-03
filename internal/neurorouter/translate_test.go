@@ -763,11 +763,11 @@ func TestRewriteResponsesRequestWithConfig_PreservesRawBodyWhenUnchanged(t *test
 	}
 }
 
-func TestRewriteResponsesRequestWithConfig_NormalizesRequestTextPartTypesWhenUnchanged(t *testing.T) {
+func TestRewriteResponsesRequestWithConfig_NormalizesRequestTextPartTypesByRoleWhenUnchanged(t *testing.T) {
 	templateBody := `{
 		"model":"gpt-5.4",
 		"input":[
-			{"type":"message","role":"user","content":[
+			{"type":"message","role":"ROLE","content":[
 				{"type":"PART_TYPE","text":"hello"},
 				{"type":"input_image","image_url":"file://image.png"}
 			]}
@@ -775,15 +775,27 @@ func TestRewriteResponsesRequestWithConfig_NormalizesRequestTextPartTypesWhenUnc
 	}`
 	templateContent := `[{"type":"PART_TYPE","text":"hello"},{"type":"input_image","image_url":"file://image.png"}]`
 
-	for _, partType := range []string{"text", "output_text"} {
-		t.Run(partType, func(t *testing.T) {
-			rawBody := []byte(strings.ReplaceAll(templateBody, "PART_TYPE", partType))
-			content := strings.ReplaceAll(templateContent, "PART_TYPE", partType)
+	cases := []struct {
+		name     string
+		role     string
+		partType string
+		wantType string
+	}{
+		{name: "user_text", role: "user", partType: "text", wantType: "input_text"},
+		{name: "user_output_text", role: "user", partType: "output_text", wantType: "input_text"},
+		{name: "assistant_text", role: "assistant", partType: "text", wantType: "output_text"},
+		{name: "assistant_input_text", role: "assistant", partType: "input_text", wantType: "output_text"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rawBody := []byte(strings.NewReplacer("ROLE", tc.role, "PART_TYPE", tc.partType).Replace(templateBody))
+			content := strings.ReplaceAll(templateContent, "PART_TYPE", tc.partType)
 
 			req := &ResponsesRequest{
 				Model: "gpt-5.4",
 				Input: []InputItem{
-					{Type: "message", Role: "user", Content: json.RawMessage(content)},
+					{Type: "message", Role: tc.role, Content: json.RawMessage(content)},
 				},
 			}
 
@@ -812,8 +824,8 @@ func TestRewriteResponsesRequestWithConfig_NormalizesRequestTextPartTypesWhenUnc
 			input := rewritten["input"].([]any)
 			contentParts := input[0].(map[string]any)["content"].([]any)
 			first := contentParts[0].(map[string]any)
-			if first["type"] != "input_text" {
-				t.Fatalf("text part type: got %v, want input_text", first["type"])
+			if first["type"] != tc.wantType {
+				t.Fatalf("text part type: got %v, want %s", first["type"], tc.wantType)
 			}
 			if first["text"] != "hello" {
 				t.Fatalf("text part text: got %v, want hello", first["text"])
@@ -822,6 +834,53 @@ func TestRewriteResponsesRequestWithConfig_NormalizesRequestTextPartTypesWhenUnc
 				t.Fatalf("non-text part changed: %+v", contentParts[1])
 			}
 		})
+	}
+}
+
+func TestRewriteResponsesRequestWithConfig_RewritesAssistantTextPartsAsOutputText(t *testing.T) {
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"assistant","content":[{"type":"input_text","text":"before"}]}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Model: "gpt-5.4",
+		Input: []InputItem{
+			{Type: "message", Role: "assistant", Content: json.RawMessage(`[{"type":"input_text","text":"before"}]`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	processed := []ChatMessage{{
+		Role:    "assistant",
+		Content: "after",
+		Source:  original[0].Source,
+	}}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, processed, FilterConfig{})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+
+	input := rewritten["input"].([]any)
+	contentParts := input[0].(map[string]any)["content"].([]any)
+	first := contentParts[0].(map[string]any)
+	if first["type"] != "output_text" {
+		t.Fatalf("text part type: got %v, want output_text", first["type"])
+	}
+	if first["text"] != "after" {
+		t.Fatalf("text part text: got %v, want after", first["text"])
 	}
 }
 

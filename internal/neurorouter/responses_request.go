@@ -268,6 +268,12 @@ func normalizeRawInputMessageItem(rawItem json.RawMessage) (json.RawMessage, boo
 		return nil, false, fmt.Errorf("decode raw item: %w", err)
 	}
 
+	role, err := rawJSONStringValue(item["role"])
+	if err != nil {
+		return nil, false, fmt.Errorf("decode raw item role: %w", err)
+	}
+	targetType := normalizedMessageTextPartType(role)
+
 	contentRaw, ok := item["content"]
 	if !ok || len(contentRaw) == 0 {
 		return rawItem, false, nil
@@ -289,10 +295,10 @@ func normalizeRawInputMessageItem(rawItem json.RawMessage) (json.RawMessage, boo
 		if err != nil {
 			return nil, false, fmt.Errorf("decode content part type: %w", err)
 		}
-		if !requiresInputTextNormalization(partType) {
+		if !isTextContentType(partType) || partType == targetType {
 			continue
 		}
-		part["type"] = marshalRawJSONString("input_text")
+		part["type"] = marshalRawJSONString(targetType)
 		normalized = true
 	}
 
@@ -314,6 +320,12 @@ func rewriteRawMessageItem(rawItem json.RawMessage, newText string) (json.RawMes
 	if err := json.Unmarshal(rawItem, &item); err != nil {
 		return nil, false, fmt.Errorf("decode raw item: %w", err)
 	}
+
+	role, err := rawJSONStringValue(item["role"])
+	if err != nil {
+		return nil, false, fmt.Errorf("decode raw item role: %w", err)
+	}
+	targetType := normalizedMessageTextPartType(role)
 
 	contentRaw, ok := item["content"]
 	if !ok || len(contentRaw) == 0 {
@@ -350,7 +362,7 @@ func rewriteRawMessageItem(rawItem json.RawMessage, newText string) (json.RawMes
 			if newText == "" || wroteText {
 				continue
 			}
-			part["type"] = marshalRawJSONString("input_text")
+			part["type"] = marshalRawJSONString(targetType)
 			part["text"] = marshalRawJSONString(newText)
 			outParts = append(outParts, part)
 			wroteText = true
@@ -362,7 +374,7 @@ func rewriteRawMessageItem(rawItem json.RawMessage, newText string) (json.RawMes
 
 	if !wroteText && newText != "" {
 		outParts = append(outParts, map[string]json.RawMessage{
-			"type": marshalRawJSONString("input_text"),
+			"type": marshalRawJSONString(targetType),
 			"text": marshalRawJSONString(newText),
 		})
 	}
@@ -391,13 +403,11 @@ func responseInputSource(index int) string {
 	return fmt.Sprintf("input:%d", index)
 }
 
-func requiresInputTextNormalization(partType string) bool {
-	switch partType {
-	case "text", "output_text":
-		return true
-	default:
-		return false
+func normalizedMessageTextPartType(role string) string {
+	if normalizeMessageRole(role) == "assistant" {
+		return "output_text"
 	}
+	return "input_text"
 }
 
 func isTextContentType(partType string) bool {
