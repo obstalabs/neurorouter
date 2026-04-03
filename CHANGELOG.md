@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.25] - 2026-04-03
+
+### Fixed
+- Claude `/v1/messages` cleanup now removes stale `Read` chains at block level instead of dropping whole mixed tool turns, so valid `tool_use` and `tool_result` pairs survive while stale reads are stripped
+- Large retained Claude `Read` tool results are now shaped deterministically under cleanup instead of passing through whole once they become the dominant remaining byte sink
+- Runtime secret diagnostics now ignore stripped Claude `thinking.signature` payloads, so Anthropic cleanup sessions no longer report those internal signatures as forwarded high-entropy secrets
+
 ## [0.1.24] - 2026-04-03
 
 ### Fixed
