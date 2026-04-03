@@ -18,7 +18,7 @@ Or download from [releases](https://github.com/obstalabs/neurorouter/releases/la
 
 ```bash
 # Claude mode
-neurorouter proxy --target https://api.anthropic.com --api-key env:ANTHROPIC_API_KEY
+neurorouter proxy --protocol anthropic --target https://api.anthropic.com --api-key env:ANTHROPIC_API_KEY
 ANTHROPIC_BASE_URL=http://localhost:4000 claude
 
 # Codex / OpenAI mode
@@ -32,6 +32,8 @@ neurorouter --dry-run
 By default NeuroRouter listens on `127.0.0.1:4000`. If you really need remote clients, opt in explicitly with `neurorouter --public --listen 0.0.0.0:4000`. On public binds, `/v1/audit` and `/v1/suggestions` stay disabled unless you also pass `--expose-management`.
 
 The community edition exposes one client protocol per instance. Point it at Anthropic and it serves `/v1/messages` for Claude Code. Point it at OpenAI-compatible upstreams and it serves the current Responses-native Codex surface. If you need both Claude and Codex at once, run two instances on different ports.
+
+If your Anthropic-compatible upstream is a custom or local URL such as `http://localhost:8443`, pass `--protocol anthropic` explicitly. Auto mode can infer protocol from well-known provider URLs, but not from a generic localhost target.
 
 For Codex, the recommended setup is a provider profile that makes the wire mode explicit:
 
