@@ -210,6 +210,10 @@ func anthropicRawToFilterString(raw json.RawMessage) (string, error) {
 		return asString, nil
 	}
 
+	if textOnly, ok := anthropicTextOnlyBlocksFilterString(raw); ok {
+		return textOnly, nil
+	}
+
 	trimmed := strings.TrimSpace(string(raw))
 	if !json.Valid(raw) {
 		return "", fmt.Errorf("invalid anthropic content JSON")
@@ -229,6 +233,10 @@ func marshalAnthropicFilteredContent(original json.RawMessage, filtered string) 
 			return nil, err
 		}
 		return encoded, nil
+	}
+
+	if anthropicContentIsTextOnlyBlocks(original) {
+		return marshalAnthropicTextBlocks(filtered)
 	}
 
 	if json.Valid([]byte(filtered)) {
@@ -266,6 +274,68 @@ func anthropicContentContainsToolBlocks(raw json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+func anthropicContentIsTextOnlyBlocks(raw json.RawMessage) bool {
+	_, ok := anthropicTextOnlyBlocksFilterString(raw)
+	return ok
+}
+
+func anthropicTextOnlyBlocksFilterString(raw json.RawMessage) (string, bool) {
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return "", false
+	}
+
+	var b strings.Builder
+	for _, block := range blocks {
+		blockType, err := rawJSONStringValue(block["type"])
+		if err != nil {
+			return "", false
+		}
+
+		switch blockType {
+		case "text":
+			text, err := rawJSONStringValue(block["text"])
+			if err != nil {
+				return "", false
+			}
+			b.WriteString(text)
+		case "thinking":
+			thinking, err := anthropicBlockString(block, "thinking")
+			if err != nil {
+				return "", false
+			}
+			b.WriteString("<thinking>")
+			b.WriteString(thinking)
+			b.WriteString("</thinking>")
+		case "redacted_thinking":
+			b.WriteString("<thinking>[redacted]</thinking>")
+		default:
+			return "", false
+		}
+	}
+
+	return b.String(), true
+}
+
+func anthropicBlockString(block map[string]json.RawMessage, field string) (string, error) {
+	if raw, ok := block[field]; ok {
+		return rawJSONStringValue(raw)
+	}
+	return "", fmt.Errorf("missing %s", field)
+}
+
+func marshalAnthropicTextBlocks(filtered string) (json.RawMessage, error) {
+	blocks := []map[string]string{{
+		"type": "text",
+		"text": filtered,
+	}}
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
 }
 
 func chatMessagesEqual(a, b []ChatMessage) bool {

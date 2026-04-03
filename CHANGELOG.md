@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.24] - 2026-04-03
+
+### Fixed
+- Anthropic Messages cleanup now rewrites text-only content block arrays semantically instead of flattening filtered JSON back into quoted strings, so Claude filtering no longer reports positive byte growth on thinking and system-reminder cleanup paths
+
 ## [0.1.23] - 2026-04-03
 
 ### Added
