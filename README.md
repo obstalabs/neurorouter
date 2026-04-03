@@ -33,6 +33,8 @@ By default NeuroRouter listens on `127.0.0.1:4000`. If you really need remote cl
 
 The community edition exposes one client protocol per instance. Point it at Anthropic and it serves `/v1/messages` for Claude Code. Point it at OpenAI-compatible upstreams and it serves the current Responses-native Codex surface. If you need both Claude and Codex at once, run two instances on different ports.
 
+For live Claude or Codex work in the community edition, the safe rule is one proxy instance per live session unless your client can provide a stable session selector on every request. The free binary does not include premium session-healing or cross-session recovery logic.
+
 If your Anthropic-compatible upstream is a custom or local URL such as `http://localhost:8443`, pass `--protocol anthropic` explicitly. Auto mode can infer protocol from well-known provider URLs, but not from a generic localhost target.
 
 For Codex, the recommended setup is a provider profile that makes the wire mode explicit:
@@ -90,6 +92,7 @@ Included in this free community edition:
 
 Paid or private-only features do not live in this repository. Those include:
 - one-process multi-client hubs that serve Claude and Codex at the same time
+- session-healing and continuity repair across mixed or reused Claude/Codex sessions
 - premium task-routing and cascade logic
 - runaway detection and pre-cooldown guidance
 - context rescue and checkpoint tooling
@@ -134,7 +137,7 @@ neurorouter config       # manage configuration
 neurorouter version      # print version
 ```
 
-For strict isolation across concurrent clients, set `X-Neurorouter-Session` on proxied requests and pass the same value to `neurorouter audit --session ...`, `neurorouter stats --session ...`, or `neurorouter dnd --session ...`. Without an explicit selector, management views use the default local session bucket.
+For strict isolation across concurrent clients, set `X-Neurorouter-Session` on proxied requests and pass the same value to `neurorouter audit --session ...`, `neurorouter stats --session ...`, or `neurorouter dnd --session ...`. Without an explicit selector, management views use the default local session bucket. For Claude Code and Codex specifically, prefer one proxy instance per live session in the community edition unless you know the client sends a stable selector.
 
 ## Repository Layout
 
