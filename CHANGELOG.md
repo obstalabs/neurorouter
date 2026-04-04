@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.27] - 2026-04-04
+
+### Fixed
+- Anthropic message cleanup now strips empty text blocks after system-reminder filtering on structured mixed-content messages, so Claude no longer receives invalid requests that fail with `400` when a reminder-only text block is paired with retained `tool_result` blocks
+
 ## [0.1.26] - 2026-04-03
 
 ### Changed
