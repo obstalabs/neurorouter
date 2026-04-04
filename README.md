@@ -3,8 +3,11 @@
 [![CI](https://github.com/obstalabs/neurorouter/actions/workflows/ci.yml/badge.svg)](https://github.com/obstalabs/neurorouter/actions/workflows/ci.yml)
 [![Go 1.24+](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Status: Stable](https://img.shields.io/badge/Status-Stable-green)](https://github.com/obstalabs/neurorouter/releases/latest)
 
 Cleans AI requests before they hit the model. Removes wasted context, blocks secrets, and preserves native client semantics locally.
+
+> **Status: Stable.** The community edition is feature-complete and receives bug fixes, security patches, and compatibility updates only. New features ship in [NeuroRouter Pro](https://neurorouter.dev/pricing).
 
 ## Install
 
