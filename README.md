@@ -7,7 +7,7 @@
 
 Cleans AI requests before they hit the model. Removes wasted context, blocks secrets, and preserves native client semantics locally.
 
-> **Status: Stable.** The community edition is feature-complete and receives bug fixes, security patches, and compatibility updates only. New features ship in [NeuroRouter Pro](https://neurorouter.dev/pricing).
+> **Status: Stable.** The community edition is feature-complete and receives bug fixes, security patches, and compatibility updates only. New features ship in [NeuroRouter Pro](https://neurorouter.dev/#pricing).
 
 ## Install
 
