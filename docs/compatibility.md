@@ -23,7 +23,7 @@ The following server behaviors are covered by automated tests in [internal/neuro
 - `POST /v1/responses` and `POST /responses`
 - `POST /v1/responses/compact` and `POST /responses/compact`
 - zstd-compressed Responses requests from built-in Codex/OpenAI client paths
-- websocket `/responses` bridging, including upstream websocket reuse and `previous_response_id` continuity
+- websocket `/responses` bridging, including direct upstream websocket reuse that preserves the native websocket envelope and `previous_response_id` continuity
 - compatibility translation from incoming Responses requests to chat-completions upstreams when the selected target does not support native Responses
 
 ## Known Unsupported Or Unverified Paths
@@ -42,6 +42,7 @@ Those paths may exist in private development or future work, but they are not pa
 - In the community edition, dedicate one proxy instance to one live Claude or Codex session unless your client can set a stable session selector such as `X-Neurorouter-Session` on every request.
 - Current Codex uses `openai_base_url` in config or `-c` overrides. Older `OPENAI_BASE_URL` environment usage is deprecated in recent releases.
 - Modern Codex default-provider usage assumes a richer protocol surface than basic HTTP POST alone: `/models`, zstd request decoding, websocket `/responses`, and newer releases like `0.118.0` also use `/responses/compact`.
+- When native websocket reuse is available, NeuroRouter relays the Responses websocket envelope unchanged. If a request falls back to the HTTP bridge path, the proxy strips websocket-only request fields like `type`, `client_metadata`, and `generate` while preserving turn continuity fields such as `previous_response_id` and Codex turn-state headers.
 - When Codex or OpenAI changes protocol behavior, update this matrix and the evidence references as part of the compatibility WO instead of burying the result in ad hoc notes.
 
 ## Operational Rule

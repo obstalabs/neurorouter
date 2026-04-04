@@ -280,6 +280,33 @@ func TestFilterSystemReminders(t *testing.T) {
 			t.Error("single reminder should not be removed")
 		}
 	})
+
+	t.Run("deduplicates repeated claude continuation summaries", func(t *testing.T) {
+		summaryBodyA := strings.Repeat("Summary A line\n", 24)
+		summaryBodyB := strings.Repeat("Summary B line\n", 24)
+		summaryA := `[{"type":"text","text":"This session is being continued from a previous conversation.\n[coalesced]\n` + summaryBodyA + `"}]`
+		summaryB := `[{"type":"text","text":"This session is being continued from a previous conversation.\n[coalesced]\n` + summaryBodyB + `"}]`
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: summaryA},
+			{Role: "assistant", Content: summaryA},
+			{Role: "assistant", Content: summaryB},
+			{Role: "user", Content: "Continue."},
+		}
+
+		out := FilterSystemReminders(msgs)
+		if len(out) != 3 {
+			t.Fatalf("expected 3 messages after duplicate summary removal, got %d", len(out))
+		}
+		if out[0].Content != summaryA {
+			t.Fatalf("expected latest duplicate summary to remain first, got %q", out[0].Content)
+		}
+		if out[1].Content != summaryB {
+			t.Fatalf("expected distinct summary to remain, got %q", out[1].Content)
+		}
+		if out[2].Content != "Continue." {
+			t.Fatalf("expected trailing user message to remain, got %q", out[2].Content)
+		}
+	})
 }
 
 func TestFilterStaleReads(t *testing.T) {
@@ -371,6 +398,41 @@ func TestFilterStaleReads(t *testing.T) {
 			t.Fatalf("stale Claude read pair should be removed: %#v", out)
 		}
 	})
+
+	t.Run("drops duplicate claude shell transcript chains", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_shell_old","name":"bash","input":{"command":"git status"}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_shell_old","content":[{"type":"json","value":{"stdout":"On branch main\nnothing to commit\n","stderr":"","returnCodeInterpretation":"exit_code:0"}}]}]`},
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_shell_new","name":"bash","input":{"command":"git status"}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_shell_new","content":[{"type":"json","value":{"stdout":"On branch main\nnothing to commit\n","stderr":"","returnCodeInterpretation":"exit_code:0"}}]}]`},
+			{Role: "user", Content: "Continue."},
+		}
+
+		out := FilterStaleReads(msgs)
+		if len(out) != 3 {
+			t.Fatalf("expected duplicate shell pair removed, got %d messages", len(out))
+		}
+		if strings.Contains(out[0].Content, "toolu_shell_old") || strings.Contains(out[1].Content, "toolu_shell_old") {
+			t.Fatalf("expected earlier shell transcript chain removed: %#v", out)
+		}
+		if !strings.Contains(out[0].Content, "toolu_shell_new") || !strings.Contains(out[1].Content, "toolu_shell_new") {
+			t.Fatalf("expected latest shell transcript chain to remain: %#v", out)
+		}
+	})
+
+	t.Run("keeps distinct claude shell transcript chains", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_shell_old","name":"bash","input":{"command":"git status"}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_shell_old","content":[{"type":"json","value":{"stdout":"On branch main\nnothing to commit\n","stderr":"","returnCodeInterpretation":"exit_code:0"}}]}]`},
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_shell_new","name":"bash","input":{"command":"git status"}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_shell_new","content":[{"type":"json","value":{"stdout":"On branch feature\nmodified: README.md\n","stderr":"","returnCodeInterpretation":"exit_code:0"}}]}]`},
+		}
+
+		out := FilterStaleReads(msgs)
+		if len(out) != 4 {
+			t.Fatalf("expected distinct shell transcript chains to remain, got %d messages", len(out))
+		}
+	})
 }
 
 func TestFilterOrphanedResults(t *testing.T) {
@@ -422,6 +484,55 @@ func TestFilterFailedRetries(t *testing.T) {
 		// No retry with same tool name, so nothing dropped.
 		if len(out) != 3 {
 			t.Fatalf("expected 3 messages, got %d", len(out))
+		}
+	})
+
+	t.Run("drops superseded claude bash retries after success", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_bash_old","name":"bash","input":{"command":"go test ./..."}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_bash_old","content":[{"type":"json","value":{"stdout":"FAIL\t./...\n","stderr":"exit status 1","returnCodeInterpretation":"exit_code:1"}}]}]`},
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_bash_new","name":"bash","input":{"command":"go test ./..."}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_bash_new","content":[{"type":"json","value":{"stdout":"ok\t./...\n","stderr":"","returnCodeInterpretation":"exit_code:0"}}]}]`},
+			{Role: "user", Content: "Continue."},
+		}
+
+		out := FilterFailedRetries(msgs)
+		if len(out) != 3 {
+			t.Fatalf("expected failed bash retry pair removed, got %d messages", len(out))
+		}
+		if strings.Contains(out[0].Content, "toolu_bash_old") || strings.Contains(out[1].Content, "toolu_bash_old") {
+			t.Fatalf("expected stale bash retry removed: %#v", out)
+		}
+	})
+
+	t.Run("drops superseded claude powershell retries after success", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_ps_old","name":"PowerShell","input":{"command":"Get-ChildItem"}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_ps_old","content":[{"type":"json","value":{"stdout":"","stderr":"Access denied","exitCode":1}}]}]`},
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_ps_new","name":"PowerShell","input":{"command":"Get-ChildItem"}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_ps_new","content":[{"type":"json","value":{"stdout":"foo.txt\n","stderr":"","exitCode":0}}]}]`},
+		}
+
+		out := FilterFailedRetries(msgs)
+		if len(out) != 2 {
+			t.Fatalf("expected failed powershell retry pair removed, got %d messages", len(out))
+		}
+		if strings.Contains(out[0].Content, "toolu_ps_old") || strings.Contains(out[1].Content, "toolu_ps_old") {
+			t.Fatalf("expected stale PowerShell retry removed: %#v", out)
+		}
+	})
+
+	t.Run("keeps unresolved claude shell failures", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_bash_old","name":"bash","input":{"command":"go test ./..."}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_bash_old","content":[{"type":"json","value":{"stdout":"FAIL\t./...\n","stderr":"exit status 1","returnCodeInterpretation":"exit_code:1"}}]}]`},
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_other","name":"bash","input":{"command":"git status"}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_other","content":[{"type":"json","value":{"stdout":"On branch main\n","stderr":"","returnCodeInterpretation":"exit_code:0"}}]}]`},
+		}
+
+		out := FilterFailedRetries(msgs)
+		if len(out) != 4 {
+			t.Fatalf("expected unresolved failure to remain, got %d messages", len(out))
 		}
 	})
 }

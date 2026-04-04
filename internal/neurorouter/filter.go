@@ -542,6 +542,8 @@ var systemReminderRe = regexp.MustCompile(`(?s)<system-reminder>.*?</system-remi
 
 // FilterSystemReminders deduplicates system-reminder blocks, keeping the last occurrence.
 func FilterSystemReminders(msgs []ChatMessage) []ChatMessage {
+	out := msgs
+
 	// First pass: find all reminders and track last occurrence.
 	type loc struct {
 		msgIdx int
@@ -581,44 +583,126 @@ func FilterSystemReminders(msgs []ChatMessage) []ChatMessage {
 		}
 	}
 
-	if len(removals) == 0 {
+	if len(removals) > 0 {
+		// Group removals by message index.
+		perMsg := make(map[int][]removal)
+		for _, r := range removals {
+			perMsg[r.msgIdx] = append(perMsg[r.msgIdx], r)
+		}
+
+		rewritten := make([]ChatMessage, 0, len(msgs))
+		for i, m := range msgs {
+			rems, hasRemovals := perMsg[i]
+			if !hasRemovals {
+				rewritten = append(rewritten, m)
+				continue
+			}
+
+			// Sort removals by start position descending for safe string surgery.
+			for j := 0; j < len(rems)-1; j++ {
+				for k := j + 1; k < len(rems); k++ {
+					if rems[k].start > rems[j].start {
+						rems[j], rems[k] = rems[k], rems[j]
+					}
+				}
+			}
+
+			content := m.Content
+			for _, r := range rems {
+				content = content[:r.start] + content[r.end:]
+			}
+			content = strings.TrimSpace(content)
+			if content == "" {
+				continue
+			}
+			rewritten = append(rewritten, ChatMessage{Role: m.Role, Content: content, Source: m.Source})
+		}
+		out = rewritten
+	}
+	return dedupeClaudeContinuationSummaries(out)
+}
+
+func dedupeClaudeContinuationSummaries(msgs []ChatMessage) []ChatMessage {
+	summaryLocs := make(map[[32]byte][]int)
+	var seenHashes [][32]byte
+
+	for i, m := range msgs {
+		text, ok := claudeContinuationSummaryText(m.Content)
+		if !ok {
+			continue
+		}
+		hash := sha256.Sum256([]byte(text))
+		if _, exists := summaryLocs[hash]; !exists {
+			seenHashes = append(seenHashes, hash)
+		}
+		summaryLocs[hash] = append(summaryLocs[hash], i)
+	}
+
+	if len(summaryLocs) == 0 {
 		return msgs
 	}
 
-	// Group removals by message index.
-	perMsg := make(map[int][]removal)
-	for _, r := range removals {
-		perMsg[r.msgIdx] = append(perMsg[r.msgIdx], r)
+	drop := make(map[int]bool)
+	for _, hash := range seenHashes {
+		locs := summaryLocs[hash]
+		if len(locs) <= 1 {
+			continue
+		}
+		for _, idx := range locs[:len(locs)-1] {
+			drop[idx] = true
+		}
 	}
 
-	out := make([]ChatMessage, 0, len(msgs))
+	if len(drop) == 0 {
+		return msgs
+	}
+
+	out := make([]ChatMessage, 0, len(msgs)-len(drop))
 	for i, m := range msgs {
-		rems, hasRemovals := perMsg[i]
-		if !hasRemovals {
-			out = append(out, m)
+		if drop[i] {
 			continue
 		}
-
-		// Sort removals by start position descending for safe string surgery.
-		for j := 0; j < len(rems)-1; j++ {
-			for k := j + 1; k < len(rems); k++ {
-				if rems[k].start > rems[j].start {
-					rems[j], rems[k] = rems[k], rems[j]
-				}
-			}
-		}
-
-		content := m.Content
-		for _, r := range rems {
-			content = content[:r.start] + content[r.end:]
-		}
-		content = strings.TrimSpace(content)
-		if content == "" {
-			continue
-		}
-		out = append(out, ChatMessage{Role: m.Role, Content: content, Source: m.Source})
+		out = append(out, m)
 	}
 	return out
+}
+
+func claudeContinuationSummaryText(content string) (string, bool) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "", false
+	}
+	if text, ok := anthropicTextOnlyBlocksFilterString(json.RawMessage(content)); ok {
+		trimmed = strings.TrimSpace(text)
+	}
+	if !looksLikeClaudeContinuationSummary(trimmed) {
+		return "", false
+	}
+	return trimmed, true
+}
+
+func looksLikeClaudeContinuationSummary(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) < 128 {
+		return false
+	}
+
+	lower := strings.ToLower(trimmed)
+	for _, marker := range []string{
+		"[coalesced]",
+		"continuation summary",
+		"summary of the conversation so far",
+		"summary of the conversation up to this point",
+		"previous conversation summary",
+		"this session is being continued from a previous conversation",
+		"this conversation is continued from a previous context window",
+		"compacted summary",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // readToolRe matches Read/read_file tool_use patterns and extracts file paths.
@@ -695,6 +779,10 @@ func FilterStaleReads(msgs []ChatMessage) []ChatMessage {
 		}
 	}
 
+	for id := range claudeDuplicateShellTranscriptToolUseIDs(msgs) {
+		staleToolUseIDs[id] = struct{}{}
+	}
+
 	if len(drop) == 0 && len(staleToolUseIDs) == 0 {
 		return msgs
 	}
@@ -707,7 +795,7 @@ func FilterStaleReads(msgs []ChatMessage) []ChatMessage {
 
 		content := m.Content
 		if len(staleToolUseIDs) > 0 {
-			rewritten, changed, removeMessage := stripClaudeStaleReadBlocks(m.Role, content, staleToolUseIDs)
+			rewritten, changed, removeMessage := stripClaudeToolChainBlocks(m.Role, content, staleToolUseIDs)
 			if removeMessage {
 				continue
 			}
@@ -794,7 +882,7 @@ func isClaudeWriteToolName(name string) bool {
 	}
 }
 
-func stripClaudeStaleReadBlocks(role, content string, staleToolUseIDs map[string]struct{}) (string, bool, bool) {
+func stripClaudeToolChainBlocks(role, content string, toolUseIDs map[string]struct{}) (string, bool, bool) {
 	if role != "assistant" && role != "user" {
 		return "", false, false
 	}
@@ -817,7 +905,7 @@ func stripClaudeStaleReadBlocks(role, content string, staleToolUseIDs map[string
 		case role == "assistant" && blockType == "tool_use":
 			id, err := rawJSONStringValue(block["id"])
 			if err == nil {
-				if _, ok := staleToolUseIDs[id]; ok {
+				if _, ok := toolUseIDs[id]; ok {
 					changed = true
 					continue
 				}
@@ -825,7 +913,7 @@ func stripClaudeStaleReadBlocks(role, content string, staleToolUseIDs map[string
 		case role == "user" && blockType == "tool_result":
 			id, err := rawJSONStringValue(block["tool_use_id"])
 			if err == nil {
-				if _, ok := staleToolUseIDs[id]; ok {
+				if _, ok := toolUseIDs[id]; ok {
 					changed = true
 					continue
 				}
@@ -847,6 +935,300 @@ func stripClaudeStaleReadBlocks(role, content string, staleToolUseIDs map[string
 		return "", false, false
 	}
 	return string(encoded), true, false
+}
+
+type claudeShellToolUse struct {
+	msgIdx    int
+	toolUseID string
+	signature string
+	shellName string
+}
+
+type claudeShellToolResult struct {
+	msgIdx          int
+	toolUseID       string
+	outputSignature string
+	success         bool
+}
+
+func claudeDuplicateShellTranscriptToolUseIDs(msgs []ChatMessage) map[string]struct{} {
+	toolUses, results := claudeShellHistory(msgs)
+	if len(toolUses) == 0 || len(results) == 0 {
+		return nil
+	}
+
+	latest := make(map[string]string)
+	drop := make(map[string]struct{})
+	for _, result := range results {
+		if !result.success {
+			continue
+		}
+		toolUse, ok := toolUses[result.toolUseID]
+		if !ok {
+			continue
+		}
+		key := toolUse.signature + "\n" + result.outputSignature
+		if prevID, exists := latest[key]; exists {
+			drop[prevID] = struct{}{}
+		}
+		latest[key] = result.toolUseID
+	}
+
+	if len(drop) == 0 {
+		return nil
+	}
+	return drop
+}
+
+func claudeFailedRetryToolUseIDs(msgs []ChatMessage) map[string]struct{} {
+	toolUses, results := claudeShellHistory(msgs)
+	if len(toolUses) == 0 || len(results) == 0 {
+		return nil
+	}
+
+	pendingFailures := make(map[string][]string)
+	drop := make(map[string]struct{})
+	for _, result := range results {
+		toolUse, ok := toolUses[result.toolUseID]
+		if !ok {
+			continue
+		}
+
+		if result.success {
+			for _, toolUseID := range pendingFailures[toolUse.signature] {
+				drop[toolUseID] = struct{}{}
+			}
+			delete(pendingFailures, toolUse.signature)
+			continue
+		}
+
+		pendingFailures[toolUse.signature] = append(pendingFailures[toolUse.signature], result.toolUseID)
+	}
+
+	if len(drop) == 0 {
+		return nil
+	}
+	return drop
+}
+
+func anthropicBlocks(raw json.RawMessage) []map[string]json.RawMessage {
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil
+	}
+	return blocks
+}
+
+func claudeShellHistory(msgs []ChatMessage) (map[string]claudeShellToolUse, []claudeShellToolResult) {
+	toolUses := make(map[string]claudeShellToolUse)
+	for i, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, block := range anthropicBlocks(json.RawMessage(m.Content)) {
+			blockType, err := rawJSONStringValue(block["type"])
+			if err != nil || blockType != "tool_use" {
+				continue
+			}
+			name, err := rawJSONStringValue(block["name"])
+			if err != nil || !isClaudeShellToolName(name) {
+				continue
+			}
+			toolUseID, err := rawJSONStringValue(block["id"])
+			if err != nil || strings.TrimSpace(toolUseID) == "" {
+				continue
+			}
+			signature, ok := claudeShellToolSignature(name, block["input"])
+			if !ok {
+				continue
+			}
+			toolUses[toolUseID] = claudeShellToolUse{
+				msgIdx:    i,
+				toolUseID: toolUseID,
+				signature: signature,
+				shellName: strings.ToLower(strings.TrimSpace(name)),
+			}
+		}
+	}
+
+	if len(toolUses) == 0 {
+		return nil, nil
+	}
+
+	results := make([]claudeShellToolResult, 0)
+	for i, m := range msgs {
+		if m.Role != "user" {
+			continue
+		}
+		for _, block := range anthropicBlocks(json.RawMessage(m.Content)) {
+			blockType, err := rawJSONStringValue(block["type"])
+			if err != nil || blockType != "tool_result" {
+				continue
+			}
+			toolUseID, err := rawJSONStringValue(block["tool_use_id"])
+			if err != nil || strings.TrimSpace(toolUseID) == "" {
+				continue
+			}
+			if _, ok := toolUses[toolUseID]; !ok {
+				continue
+			}
+
+			outputSignature, success, ok := claudeShellToolResultSignature(block)
+			if !ok {
+				continue
+			}
+			results = append(results, claudeShellToolResult{
+				msgIdx:          i,
+				toolUseID:       toolUseID,
+				outputSignature: outputSignature,
+				success:         success,
+			})
+		}
+	}
+
+	return toolUses, results
+}
+
+func claudeShellToolSignature(name string, rawInput json.RawMessage) (string, bool) {
+	if !isClaudeShellToolName(name) || len(rawInput) == 0 {
+		return "", false
+	}
+	canonical, err := canonicalizeRawJSON(rawInput)
+	if err != nil || canonical == "" {
+		return "", false
+	}
+	return strings.ToLower(strings.TrimSpace(name)) + ":" + canonical, true
+}
+
+func claudeShellToolResultSignature(block map[string]json.RawMessage) (string, bool, bool) {
+	rawContent, ok := block["content"]
+	if !ok || len(rawContent) == 0 {
+		return "", false, false
+	}
+
+	for _, payload := range claudeStructuredShellPayloads(rawContent) {
+		canonical, err := canonicalizeRawJSON(marshalRawValue(payload))
+		if err != nil || canonical == "" {
+			continue
+		}
+		return canonical, claudeShellPayloadSucceeded(payload), true
+	}
+
+	return "", false, false
+}
+
+func claudeStructuredShellPayloads(rawContent json.RawMessage) []map[string]json.RawMessage {
+	if len(rawContent) == 0 {
+		return nil
+	}
+
+	var direct string
+	if err := json.Unmarshal(rawContent, &direct); err == nil {
+		if payload, ok := decodeClaudeShellPayload(json.RawMessage(direct)); ok {
+			return []map[string]json.RawMessage{payload}
+		}
+		return nil
+	}
+
+	var parts []map[string]json.RawMessage
+	if err := json.Unmarshal(rawContent, &parts); err != nil {
+		return nil
+	}
+
+	payloads := make([]map[string]json.RawMessage, 0, len(parts))
+	for _, part := range parts {
+		partType, err := rawJSONStringValue(part["type"])
+		if err != nil {
+			continue
+		}
+		switch partType {
+		case "text":
+			text, err := rawJSONStringValue(part["text"])
+			if err != nil {
+				continue
+			}
+			if payload, ok := decodeClaudeShellPayload(json.RawMessage(text)); ok {
+				payloads = append(payloads, payload)
+			}
+		case "json":
+			if payload, ok := decodeClaudeShellPayload(part["value"]); ok {
+				payloads = append(payloads, payload)
+			}
+		}
+	}
+	return payloads
+}
+
+func decodeClaudeShellPayload(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, false
+	}
+	if !looksLikeClaudeShellPayload(payload) {
+		return nil, false
+	}
+	return payload, true
+}
+
+func looksLikeClaudeShellPayload(payload map[string]json.RawMessage) bool {
+	for _, field := range []string{
+		"stdout",
+		"stderr",
+		"returnCodeInterpretation",
+		"exit_code",
+		"exitCode",
+		"backgroundedByUser",
+		"interrupted",
+	} {
+		if len(payload[field]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeShellPayloadSucceeded(payload map[string]json.RawMessage) bool {
+	if exitCode, ok, err := rawJSONIntValue(payload["exit_code"]); err == nil && ok {
+		return exitCode == 0
+	}
+	if exitCode, ok, err := rawJSONIntValue(payload["exitCode"]); err == nil && ok {
+		return exitCode == 0
+	}
+	if interpretation, err := rawJSONStringValue(payload["returnCodeInterpretation"]); err == nil {
+		normalized := strings.ToLower(strings.TrimSpace(interpretation))
+		switch {
+		case strings.Contains(normalized, "exit_code:0"):
+			return true
+		case strings.Contains(normalized, "exit_code:"):
+			return false
+		case normalized == "success", normalized == "ok":
+			return true
+		}
+	}
+	if interrupted, ok := rawJSONBoolValue(payload["interrupted"]); ok && interrupted {
+		return false
+	}
+	if stderr, err := rawJSONStringValue(payload["stderr"]); err == nil && strings.TrimSpace(stderr) != "" {
+		return false
+	}
+	if stdout, err := rawJSONStringValue(payload["stdout"]); err == nil && strings.TrimSpace(stdout) != "" {
+		return true
+	}
+	return false
+}
+
+func rawJSONBoolValue(raw json.RawMessage) (bool, bool) {
+	if len(raw) == 0 {
+		return false, false
+	}
+	var out bool
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return false, false
+	}
+	return out, true
 }
 
 // toolUseIDRe extracts tool_use IDs from assistant messages.
@@ -916,6 +1298,10 @@ var toolSignatureRe = regexp.MustCompile(`"name"\s*:\s*"([^"]+)"`)
 // FilterFailedRetries removes failed tool attempt + error result pairs
 // where a subsequent message retries the same operation.
 func FilterFailedRetries(msgs []ChatMessage) []ChatMessage {
+	if claudeDropIDs := claudeFailedRetryToolUseIDs(msgs); len(claudeDropIDs) > 0 {
+		msgs = dropClaudeToolChainPairs(msgs, claudeDropIDs)
+	}
+
 	drop := make(map[int]bool)
 
 	for i, m := range msgs {
@@ -996,6 +1382,26 @@ func FilterFailedRetries(msgs []ChatMessage) []ChatMessage {
 		if !drop[i] {
 			out = append(out, m)
 		}
+	}
+	return out
+}
+
+func dropClaudeToolChainPairs(msgs []ChatMessage, toolUseIDs map[string]struct{}) []ChatMessage {
+	if len(toolUseIDs) == 0 {
+		return msgs
+	}
+
+	out := make([]ChatMessage, 0, len(msgs))
+	for _, m := range msgs {
+		rewritten, changed, removeMessage := stripClaudeToolChainBlocks(m.Role, m.Content, toolUseIDs)
+		if removeMessage {
+			continue
+		}
+		if changed {
+			out = append(out, ChatMessage{Role: m.Role, Content: rewritten, Source: m.Source})
+			continue
+		}
+		out = append(out, m)
 	}
 	return out
 }

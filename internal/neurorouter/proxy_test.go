@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -824,6 +825,256 @@ func TestHandleMessages_AnthropicProtocolPreservesMixedToolTurnDuringStaleReadCl
 	}
 	if !strings.Contains(firstUser, "toolu_grep") {
 		t.Fatalf("live grep tool_result should remain upstream: %s", firstUser)
+	}
+}
+
+func TestHandleMessages_AnthropicProtocolAuditsCompactionSummaryDedupe(t *testing.T) {
+	var capturedReq *MessagesRequest
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		req, err := UnmarshalMessagesRequest(body)
+		if err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		capturedReq = req
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_summary","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet","stop_reason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen:       ":0",
+		ProtocolMode: ProtocolModeAnthropic,
+		Targets: map[string]Target{
+			"default": {BaseURL: upstream.URL, APIKey: "sk-ant-proxy"},
+		},
+		Filters: FilterConfig{
+			SystemReminders: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	summaryBodyA := strings.Repeat("Summary A line\n", 200)
+	summaryBodyB := strings.Repeat("Summary B line\n", 40)
+	summaryTextA := "This session is being continued from a previous conversation.\n[coalesced]\n" + summaryBodyA
+	summaryTextB := "This session is being continued from a previous conversation.\n[coalesced]\n" + summaryBodyB
+	body := `{
+		"model":"claude-sonnet",
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":` + strconv.Quote(summaryTextA) + `}]},
+			{"role":"assistant","content":[{"type":"text","text":"ok"}]},
+			{"role":"user","content":[{"type":"text","text":` + strconv.Quote(summaryTextA) + `}]},
+			{"role":"assistant","content":[{"type":"text","text":"still ok"}]},
+			{"role":"user","content":[{"type":"text","text":` + strconv.Quote(summaryTextB) + `}]}
+		]
+	}`
+	req, err := http.NewRequest(http.MethodPost, localProxyURL(addr, "/v1/messages"), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", defaultAnthropicAPIVersion)
+	req.Header.Set(sessionHeaderName, "claude-proof-compaction-summary")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(data))
+	}
+	if capturedReq == nil {
+		t.Fatal("expected upstream request to be captured")
+	}
+	if len(capturedReq.Messages) != 4 {
+		t.Fatalf("messages: got %d, want 4", len(capturedReq.Messages))
+	}
+
+	audit := fetchAuditPayload(t, addr, "claude-proof-compaction-summary")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "system_reminders"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
+func TestHandleMessages_AnthropicProtocolAuditsClaudeShellTranscriptDedupe(t *testing.T) {
+	var capturedReq *MessagesRequest
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		req, err := UnmarshalMessagesRequest(body)
+		if err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		capturedReq = req
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_shell_dedupe","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet","stop_reason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen:       ":0",
+		ProtocolMode: ProtocolModeAnthropic,
+		Targets: map[string]Target{
+			"default": {BaseURL: upstream.URL, APIKey: "sk-ant-proxy"},
+		},
+		Filters: FilterConfig{
+			StaleReads: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	largeStdout := strings.Repeat("On branch main\nnothing to commit\n", 4000)
+	body := `{
+		"model":"claude-sonnet",
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_shell_old","name":"bash","input":{"command":"git status"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_shell_old","content":[{"type":"json","value":{"stdout":` + strconv.Quote(largeStdout) + `,"stderr":"","returnCodeInterpretation":"exit_code:0"}}]}]},
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_shell_new","name":"bash","input":{"command":"git status"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_shell_new","content":[{"type":"json","value":{"stdout":` + strconv.Quote(largeStdout) + `,"stderr":"","returnCodeInterpretation":"exit_code:0"}}]}]}
+		]
+	}`
+	req, err := http.NewRequest(http.MethodPost, localProxyURL(addr, "/v1/messages"), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", defaultAnthropicAPIVersion)
+	req.Header.Set(sessionHeaderName, "claude-proof-shell-history")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(data))
+	}
+	if capturedReq == nil {
+		t.Fatal("expected upstream request to be captured")
+	}
+	if len(capturedReq.Messages) != 2 {
+		t.Fatalf("messages: got %d, want 2", len(capturedReq.Messages))
+	}
+
+	audit := fetchAuditPayload(t, addr, "claude-proof-shell-history")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "stale_reads"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+}
+
+func TestHandleMessages_AnthropicProtocolAuditsClaudeShellRetryCleanup(t *testing.T) {
+	var capturedReq *MessagesRequest
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		req, err := UnmarshalMessagesRequest(body)
+		if err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		capturedReq = req
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_shell_retry","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet","stop_reason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+
+	p := NewProxy(ProxyConfig{
+		Listen:       ":0",
+		ProtocolMode: ProtocolModeAnthropic,
+		Targets: map[string]Target{
+			"default": {BaseURL: upstream.URL, APIKey: "sk-ant-proxy"},
+		},
+		Filters: FilterConfig{
+			FailedRetries: true,
+		},
+	})
+	addr, err := p.Start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	largeFailure := strings.Repeat("FAIL\t./...\nexit status 1\n", 4000)
+	body := `{
+		"model":"claude-sonnet",
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_bash_old","name":"bash","input":{"command":"go test ./..."}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bash_old","content":[{"type":"json","value":{"stdout":` + strconv.Quote(largeFailure) + `,"stderr":"exit status 1","returnCodeInterpretation":"exit_code:1"}}]}]},
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_bash_new","name":"bash","input":{"command":"go test ./..."}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bash_new","content":[{"type":"json","value":{"stdout":"ok\t./...\n","stderr":"","returnCodeInterpretation":"exit_code:0"}}]}]}
+		]
+	}`
+	req, err := http.NewRequest(http.MethodPost, localProxyURL(addr, "/v1/messages"), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", defaultAnthropicAPIVersion)
+	req.Header.Set(sessionHeaderName, "claude-proof-shell-retry")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, string(data))
+	}
+	if capturedReq == nil {
+		t.Fatal("expected upstream request to be captured")
+	}
+	if len(capturedReq.Messages) != 2 {
+		t.Fatalf("messages: got %d, want 2", len(capturedReq.Messages))
+	}
+
+	audit := fetchAuditPayload(t, addr, "claude-proof-shell-retry")
+	if audit.Count != 1 {
+		t.Fatalf("audit count: got %d, want 1", audit.Count)
+	}
+	entry := audit.Entries[0]
+	if entry.BytesBefore <= entry.BytesAfter {
+		t.Fatalf("expected bytes to shrink, got before=%d after=%d", entry.BytesBefore, entry.BytesAfter)
+	}
+	if got, want := strings.Join(entry.FiltersRun, ","), "failed_retries"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
 	}
 }
 
