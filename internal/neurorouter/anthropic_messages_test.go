@@ -214,3 +214,75 @@ func TestRewriteAnthropicMessages_EmptyTextBlockAfterSystemReminderStrip(t *test
 		t.Fatalf("expected 2 tool_result blocks preserved, got %d", toolResults)
 	}
 }
+
+func TestMarshalAnthropicTextBlocks_StripsWhitespaceOnlyText(t *testing.T) {
+	content, err := marshalAnthropicTextBlocks("  \n\t  ")
+	if err != nil {
+		t.Fatalf("marshal text blocks: %v", err)
+	}
+	if content != nil {
+		t.Fatalf("expected whitespace-only text blocks to be dropped, got %s", string(content))
+	}
+}
+
+func TestMarshalAnthropicFilteredContent_ToolFallbackStripsEmptyTextBlocks(t *testing.T) {
+	original := json.RawMessage(`[
+		{"type":"tool_result","tool_use_id":"toolu_01A","content":"file contents"},
+		{"type":"text","text":"   "}
+	]`)
+
+	content, err := marshalAnthropicFilteredContent(original, "visible fallback")
+	if err != nil {
+		t.Fatalf("marshal filtered content: %v", err)
+	}
+
+	var blocks []map[string]any
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("blocks: got %d, want 1", len(blocks))
+	}
+	if got := blocks[0]["type"]; got != "tool_result" {
+		t.Fatalf("type: got %v, want tool_result", got)
+	}
+}
+
+func TestRewriteAnthropicMessagesRequest_RejectsBrokenRoleAlternation(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet",
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"assistant","content":[{"type":"text","text":"assistant reply"}]},
+			{"role":"user","content":"second"}
+		]
+	}`)
+
+	req, err := UnmarshalMessagesRequest(body)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	original, err := ExtractAnthropicMessages(req)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	filtered := []ChatMessage{
+		original[0],
+		{
+			Role:    "assistant",
+			Content: "   \n\t",
+			Source:  original[1].Source,
+		},
+		original[2],
+	}
+
+	_, err = RewriteAnthropicMessagesRequest(body, original, filtered)
+	if err == nil {
+		t.Fatal("expected broken alternation error, got nil")
+	}
+	if !strings.Contains(err.Error(), `consecutive "user" roles`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

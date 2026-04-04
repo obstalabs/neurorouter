@@ -163,6 +163,7 @@ func RewriteAnthropicMessagesRequest(rawBody []byte, originalMsgs, filteredMsgs 
 	}
 
 	rewritten := make([]APIMessage, 0, len(req.Messages))
+	rewrittenOriginalIdx := make([]int, 0, len(req.Messages))
 	for i, msg := range req.Messages {
 		filtered, ok := kept[anthropicMessageSource(i)]
 		if !ok {
@@ -173,9 +174,17 @@ func RewriteAnthropicMessagesRequest(rawBody []byte, originalMsgs, filteredMsgs 
 		if err != nil {
 			return nil, fmt.Errorf("rewrite message %d: %w", i, err)
 		}
+		if len(msg.Content) == 0 {
+			continue
+		}
 		rewritten = append(rewritten, msg)
+		rewrittenOriginalIdx = append(rewrittenOriginalIdx, i)
 	}
 	req.Messages = rewritten
+
+	if err := validateAnthropicRewrittenRequest(req, rewrittenOriginalIdx); err != nil {
+		return nil, err
+	}
 
 	body, err := MarshalMessagesRequest(req)
 	if err != nil {
@@ -232,7 +241,7 @@ func marshalAnthropicFilteredContent(original json.RawMessage, filtered string) 
 		if err != nil {
 			return nil, err
 		}
-		return encoded, nil
+		return finalizeAnthropicMarshaledContent(encoded), nil
 	}
 
 	if anthropicContentIsTextOnlyBlocks(original) {
@@ -240,22 +249,18 @@ func marshalAnthropicFilteredContent(original json.RawMessage, filtered string) 
 	}
 
 	if json.Valid([]byte(filtered)) {
-		cleaned := stripEmptyTextBlocks([]byte(filtered))
-		if len(cleaned) == 0 {
-			return nil, nil
-		}
-		return json.RawMessage(cleaned), nil
+		return finalizeAnthropicMarshaledContent(json.RawMessage(filtered)), nil
 	}
 
 	if anthropicContentContainsToolBlocks(original) {
-		return append(json.RawMessage(nil), original...), nil
+		return finalizeAnthropicMarshaledContent(append(json.RawMessage(nil), original...)), nil
 	}
 
 	encoded, err := json.Marshal(filtered)
 	if err != nil {
 		return nil, err
 	}
-	return encoded, nil
+	return finalizeAnthropicMarshaledContent(encoded), nil
 }
 
 func anthropicContentWasJSONString(raw json.RawMessage) bool {
@@ -324,6 +329,24 @@ func stripEmptyTextBlocks(raw []byte) []byte {
 	return result
 }
 
+func finalizeAnthropicMarshaledContent(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	cleaned := stripEmptyTextBlocks(raw)
+	if len(cleaned) == 0 {
+		return nil
+	}
+
+	var text string
+	if err := json.Unmarshal(cleaned, &text); err == nil && strings.TrimSpace(text) == "" {
+		return nil
+	}
+
+	return cleaned
+}
+
 func anthropicContentIsTextOnlyBlocks(raw json.RawMessage) bool {
 	_, ok := anthropicTextOnlyBlocksFilterString(raw)
 	return ok
@@ -383,7 +406,80 @@ func marshalAnthropicTextBlocks(filtered string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	return encoded, nil
+	return finalizeAnthropicMarshaledContent(encoded), nil
+}
+
+func validateAnthropicRewrittenRequest(req *MessagesRequest, originalIdx []int) error {
+	if err := validateAnthropicContentBlocks(req.System, "system"); err != nil {
+		return err
+	}
+
+	for i, msg := range req.Messages {
+		if len(msg.Content) == 0 {
+			return fmt.Errorf("anthropic rewrite produced empty content for messages[%d]", i)
+		}
+		if err := validateAnthropicContentBlocks(msg.Content, fmt.Sprintf("messages[%d].content", i)); err != nil {
+			return err
+		}
+		if i == 0 {
+			continue
+		}
+		if req.Messages[i-1].Role == msg.Role && !adjacentInOriginal(originalIdx, i-1, i) {
+			return fmt.Errorf(
+				"anthropic rewrite produced consecutive %q roles at messages[%d] and messages[%d]",
+				msg.Role,
+				i-1,
+				i,
+			)
+		}
+	}
+
+	return nil
+}
+
+func adjacentInOriginal(originalIdx []int, left, right int) bool {
+	if left < 0 || right >= len(originalIdx) {
+		return false
+	}
+	return originalIdx[right]-originalIdx[left] == 1
+}
+
+func validateAnthropicContentBlocks(raw json.RawMessage, path string) error {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		if strings.TrimSpace(text) == "" {
+			return fmt.Errorf("%s is empty after rewrite", path)
+		}
+		return nil
+	}
+
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil
+	}
+	if len(blocks) == 0 {
+		return fmt.Errorf("%s has no remaining content blocks after rewrite", path)
+	}
+
+	for i, block := range blocks {
+		blockType, err := rawJSONStringValue(block["type"])
+		if err != nil || blockType != "text" {
+			continue
+		}
+		text, err := rawJSONStringValue(block["text"])
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(text) == "" {
+			return fmt.Errorf("%s[%d] is an empty text block after rewrite", path, i)
+		}
+	}
+
+	return nil
 }
 
 func chatMessagesEqual(a, b []ChatMessage) bool {
