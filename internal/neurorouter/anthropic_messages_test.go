@@ -139,3 +139,78 @@ func TestRewriteAnthropicMessagesRequest_SystemReminderFilterShrinksTextBlocks(t
 		t.Fatalf("expected last reminder retained, got %q", secondBlocks[0]["text"])
 	}
 }
+
+func TestRewriteAnthropicMessages_EmptyTextBlockAfterSystemReminderStrip(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-opus-4-6",
+		"max_tokens": 16000,
+		"messages": [
+			{"role": "assistant", "content": [
+				{"type": "tool_use", "id": "toolu_01A", "name": "Read", "input": {"file_path": "/tmp/test.go"}},
+				{"type": "tool_use", "id": "toolu_01B", "name": "Read", "input": {"file_path": "/tmp/other.go"}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "toolu_01A", "content": "file contents A"},
+				{"type": "tool_result", "tool_use_id": "toolu_01B", "content": "file contents B"},
+				{"type": "text", "text": "<system-reminder>\nThe user sent a message.\n</system-reminder>"}
+			]}
+		]
+	}`)
+
+	req, err := UnmarshalMessagesRequest(body)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	original, err := ExtractAnthropicMessages(req)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	filtered := FilterSystemReminders(original)
+
+	result, err := RewriteAnthropicMessagesRequest(body, original, filtered)
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	var rewritten struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	for i, msg := range rewritten.Messages {
+		var blocks []map[string]any
+		if err := json.Unmarshal(msg.Content, &blocks); err != nil {
+			continue
+		}
+		for j, block := range blocks {
+			if block["type"] == "text" {
+				text, _ := block["text"].(string)
+				if strings.TrimSpace(text) == "" {
+					t.Fatalf("message[%d] content[%d]: empty text block survived filtering", i, j)
+				}
+			}
+		}
+	}
+
+	var userBlocks []map[string]any
+	if err := json.Unmarshal(rewritten.Messages[1].Content, &userBlocks); err != nil {
+		t.Fatalf("unmarshal user content: %v", err)
+	}
+
+	toolResults := 0
+	for _, block := range userBlocks {
+		if block["type"] == "tool_result" {
+			toolResults++
+		}
+	}
+	if toolResults != 2 {
+		t.Fatalf("expected 2 tool_result blocks preserved, got %d", toolResults)
+	}
+}

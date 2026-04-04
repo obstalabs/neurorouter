@@ -240,7 +240,11 @@ func marshalAnthropicFilteredContent(original json.RawMessage, filtered string) 
 	}
 
 	if json.Valid([]byte(filtered)) {
-		return json.RawMessage(filtered), nil
+		cleaned := stripEmptyTextBlocks([]byte(filtered))
+		if len(cleaned) == 0 {
+			return nil, nil
+		}
+		return json.RawMessage(cleaned), nil
 	}
 
 	if anthropicContentContainsToolBlocks(original) {
@@ -274,6 +278,50 @@ func anthropicContentContainsToolBlocks(raw json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+// stripEmptyTextBlocks removes empty text blocks left behind by filters such as
+// system_reminders so Anthropic never receives invalid blank text content.
+func stripEmptyTextBlocks(raw []byte) []byte {
+	var blocks []json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return raw
+	}
+
+	out := make([]json.RawMessage, 0, len(blocks))
+	for _, block := range blocks {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(block, &obj); err != nil {
+			out = append(out, block)
+			continue
+		}
+
+		blockType, err := rawJSONStringValue(obj["type"])
+		if err != nil || blockType != "text" {
+			out = append(out, block)
+			continue
+		}
+
+		text, err := rawJSONStringValue(obj["text"])
+		if err != nil {
+			out = append(out, block)
+			continue
+		}
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		out = append(out, block)
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+
+	result, err := json.Marshal(out)
+	if err != nil {
+		return raw
+	}
+	return result
 }
 
 func anthropicContentIsTextOnlyBlocks(raw json.RawMessage) bool {
