@@ -1,6 +1,7 @@
 package neurorouter
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -189,6 +190,14 @@ func RewriteAnthropicMessagesRequest(rawBody []byte, originalMsgs, filteredMsgs 
 	body, err := MarshalMessagesRequest(req)
 	if err != nil {
 		return nil, err
+	}
+
+	// Compact the rewritten body to eliminate any serialization overhead
+	// (whitespace, key reordering) that could make the filtered output
+	// larger than the original despite content removal.
+	var compacted bytes.Buffer
+	if err := json.Compact(&compacted, body); err == nil && compacted.Len() < len(body) {
+		body = compacted.Bytes()
 	}
 
 	return &AnthropicMessagesRewriteResult{
