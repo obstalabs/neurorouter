@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.29] - 2026-04-04
+
+### Fixed
+- Claude continuation-history cleanup now deduplicates repeated auto-compaction summaries so only the latest equivalent continuation summary survives while distinct summaries remain intact
+- Claude stale-read cleanup now also removes repeated structured shell transcript chains when the same shell command and output are replayed again, keeping only the latest equivalent transcript
+- Claude failed-retry cleanup now drops superseded failed bash and PowerShell tool results once a later equivalent shell attempt succeeds, while unresolved failures and distinct commands remain intact
+
+### Changed
+- Compatibility docs now distinguish direct upstream Responses websocket relay, which preserves the native websocket envelope, from the HTTP fallback bridge, which strips websocket-only request fields while keeping continuity fields intact
+
 ## [0.1.28] - 2026-04-04
 
 ### Fixed
