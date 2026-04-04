@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.28] - 2026-04-04
+
+### Fixed
+- Anthropic rewrite hardening now strips empty text blocks on every marshal path instead of only one filtered-content branch, so future cleanup changes cannot reintroduce blank-content `400` failures through alternate content encodings
+- Anthropic rewrite validation now detects same-role adjacency introduced by message removal while allowing pre-existing upstream adjacency to pass through unchanged, preventing future filter changes from silently producing invalid user/user or assistant/assistant sequences
+
 ## [0.1.27] - 2026-04-04
 
 ### Fixed
