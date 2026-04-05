@@ -3,6 +3,7 @@ package neurorouter
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -711,25 +712,27 @@ var readToolRe = regexp.MustCompile(`"name"\s*:\s*"(?:Read|read_file|View|ReadFi
 // writeToolRe matches Write/Edit/write_file tool_use patterns.
 var writeToolRe = regexp.MustCompile(`"name"\s*:\s*"(?:Write|Edit|write_file|WriteFile|NotebookEdit)"[^}]*"(?:file_path|path)"\s*:\s*"([^"]+)"`)
 
-// FilterStaleReads removes messages containing file reads where the same file
-// was read again later without an intervening write.
+// FilterStaleReads removes duplicate file reads while preserving the latest
+// distinct read context for a file within each write-delimited segment.
 type staleReadEvent struct {
 	msgIdx    int
+	signature string
 	toolUseID string
 }
 
 type claudeToolUseEvent struct {
-	id      string
-	path    string
-	isRead  bool
-	isWrite bool
+	id        string
+	path      string
+	signature string
+	isRead    bool
+	isWrite   bool
 }
 
 func FilterStaleReads(msgs []ChatMessage) []ChatMessage {
 	lastRead := make(map[string][]staleReadEvent) // path → list of read events
 
 	// First pass: collect all read and write events.
-	writes := make(map[string]int) // path → latest write index
+	writes := make(map[string][]int) // path → write indices
 	for i, m := range msgs {
 		if events, parsed := claudeToolUseEvents(m.Content); parsed {
 			for _, event := range events {
@@ -737,11 +740,12 @@ func FilterStaleReads(msgs []ChatMessage) []ChatMessage {
 					continue
 				}
 				if event.isWrite {
-					writes[event.path] = i
+					writes[event.path] = append(writes[event.path], i)
 				}
 				if event.isRead {
 					lastRead[event.path] = append(lastRead[event.path], staleReadEvent{
 						msgIdx:    i,
+						signature: event.signature,
 						toolUseID: event.id,
 					})
 				}
@@ -749,10 +753,13 @@ func FilterStaleReads(msgs []ChatMessage) []ChatMessage {
 			continue
 		}
 		for _, match := range writeToolRe.FindAllStringSubmatch(m.Content, -1) {
-			writes[match[1]] = i
+			writes[match[1]] = append(writes[match[1]], i)
 		}
 		for _, match := range readToolRe.FindAllStringSubmatch(m.Content, -1) {
-			lastRead[match[1]] = append(lastRead[match[1]], staleReadEvent{msgIdx: i})
+			lastRead[match[1]] = append(lastRead[match[1]], staleReadEvent{
+				msgIdx:    i,
+				signature: staleReadFallbackSignature(m.Content, match[1]),
+			})
 		}
 	}
 
@@ -760,17 +767,7 @@ func FilterStaleReads(msgs []ChatMessage) []ChatMessage {
 	drop := make(map[int]bool)
 	staleToolUseIDs := make(map[string]struct{})
 	for path, events := range lastRead {
-		if len(events) <= 1 {
-			continue
-		}
-		latestWrite, hasWrite := writes[path]
-		// Keep only the last read. Drop earlier reads unless a write occurred after them.
-		last := events[len(events)-1]
-		for _, event := range events[:len(events)-1] {
-			if hasWrite && latestWrite > event.msgIdx && latestWrite < last.msgIdx {
-				// Write occurred between this read and the last read — keep this read.
-				continue
-			}
+		for _, event := range staleReadEventsToDrop(events, writes[path]) {
 			if event.toolUseID != "" {
 				staleToolUseIDs[event.toolUseID] = struct{}{}
 				continue
@@ -808,6 +805,53 @@ func FilterStaleReads(msgs []ChatMessage) []ChatMessage {
 	return out
 }
 
+func staleReadEventsToDrop(events []staleReadEvent, writeIndices []int) []staleReadEvent {
+	if len(events) <= 1 {
+		return nil
+	}
+
+	stale := make([]staleReadEvent, 0, len(events)-1)
+	readPos := 0
+	for _, writeIdx := range writeIndices {
+		segmentStart := readPos
+		for readPos < len(events) && events[readPos].msgIdx < writeIdx {
+			readPos++
+		}
+		stale = append(stale, staleReadSegmentDuplicates(events[segmentStart:readPos])...)
+	}
+	stale = append(stale, staleReadSegmentDuplicates(events[readPos:])...)
+	return stale
+}
+
+func staleReadSegmentDuplicates(events []staleReadEvent) []staleReadEvent {
+	if len(events) <= 1 {
+		return nil
+	}
+
+	bySignature := make(map[string][]staleReadEvent)
+	order := make([]string, 0, len(events))
+	for _, event := range events {
+		signature := strings.TrimSpace(event.signature)
+		if signature == "" {
+			signature = fmt.Sprintf("unique:%d", event.msgIdx)
+		}
+		if _, exists := bySignature[signature]; !exists {
+			order = append(order, signature)
+		}
+		bySignature[signature] = append(bySignature[signature], event)
+	}
+
+	stale := make([]staleReadEvent, 0, len(events)-1)
+	for _, signature := range order {
+		duplicates := bySignature[signature]
+		if len(duplicates) <= 1 {
+			continue
+		}
+		stale = append(stale, duplicates[:len(duplicates)-1]...)
+	}
+	return stale
+}
+
 func claudeToolUseEvents(content string) ([]claudeToolUseEvent, bool) {
 	var blocks []map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(content), &blocks); err != nil {
@@ -838,13 +882,32 @@ func claudeToolUseEvents(content string) ([]claudeToolUseEvent, bool) {
 		}
 
 		events = append(events, claudeToolUseEvent{
-			id:      id,
-			path:    path,
-			isRead:  isRead,
-			isWrite: isWrite,
+			id:        id,
+			path:      path,
+			signature: claudeReadToolSignature(block["input"], path),
+			isRead:    isRead,
+			isWrite:   isWrite,
 		})
 	}
 	return events, true
+}
+
+func claudeReadToolSignature(rawInput json.RawMessage, fallbackPath string) string {
+	canonical, err := canonicalizeRawJSON(rawInput)
+	if err == nil && canonical != "" {
+		return canonical
+	}
+	return fallbackPath
+}
+
+func staleReadFallbackSignature(content string, fallbackPath string) string {
+	var block map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &block); err == nil {
+		if rawInput, ok := block["input"]; ok {
+			return claudeReadToolSignature(rawInput, fallbackPath)
+		}
+	}
+	return fallbackPath
 }
 
 func claudeToolPath(rawInput json.RawMessage) string {

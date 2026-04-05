@@ -13,12 +13,15 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 const responsesWebsocketReadLimit = 8 << 20
 const openAIResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
+
+var responsesWebsocketIdleGrace = 30 * time.Second
 
 var responsesWebsocketConnectionSeq uint64
 
@@ -32,10 +35,14 @@ var responsesWebsocketUpgrader = websocket.Upgrader{
 
 type responsesWebsocketBridgeState struct {
 	mu              sync.Mutex
+	relayMu         sync.Mutex
 	sessionKey      string
 	turnState       string
 	upstream        *websocket.Conn
 	upstreamBaseURL string
+	ephemeral       bool
+	refs            int
+	idleSince       time.Time
 }
 
 func (s *responsesWebsocketBridgeState) close() {
@@ -52,6 +59,27 @@ func (s *responsesWebsocketBridgeState) resetUpstreamLocked() {
 	s.upstreamBaseURL = ""
 }
 
+func (s *responsesWebsocketBridgeState) resetUpstream() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resetUpstreamLocked()
+}
+
+func (s *responsesWebsocketBridgeState) turnStateSnapshot() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnState
+}
+
+func (s *responsesWebsocketBridgeState) setTurnState(turnState string) {
+	if strings.TrimSpace(turnState) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.turnState = turnState
+}
+
 type responsesWebsocketRegistry struct {
 	mu     sync.Mutex
 	states map[string]*responsesWebsocketBridgeState
@@ -63,25 +91,31 @@ func newResponsesWebsocketRegistry() *responsesWebsocketRegistry {
 	}
 }
 
-func (r *responsesWebsocketRegistry) state(key, initialTurnState string) *responsesWebsocketBridgeState {
+func (r *responsesWebsocketRegistry) state(key, initialTurnState string, ephemeral bool, acquire bool) *responsesWebsocketBridgeState {
 	sessionKey := normalizeSessionKey(key)
 	if sessionKey == "" {
 		sessionKey = defaultSessionKey
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	closing := r.pruneExpiredLocked(timeNow())
 	state, ok := r.states[sessionKey]
 	if !ok {
-		state = &responsesWebsocketBridgeState{sessionKey: sessionKey}
+		state = &responsesWebsocketBridgeState{sessionKey: sessionKey, ephemeral: ephemeral}
 		r.states[sessionKey] = state
+		acquire = true
 	}
 	state.mu.Lock()
+	if acquire {
+		state.refs++
+		state.idleSince = time.Time{}
+	}
 	if state.turnState == "" && initialTurnState != "" {
 		state.turnState = initialTurnState
 	}
 	state.mu.Unlock()
+	r.mu.Unlock()
+	closeResponsesWebsocketStates(closing)
 	return state
 }
 
@@ -92,15 +126,27 @@ func (r *responsesWebsocketRegistry) release(key string) {
 	}
 
 	r.mu.Lock()
-	state, ok := r.states[sessionKey]
-	if ok {
-		delete(r.states, sessionKey)
+	state := r.states[sessionKey]
+	var closing []*responsesWebsocketBridgeState
+	if state != nil {
+		state.mu.Lock()
+		if state.refs > 0 {
+			state.refs--
+		}
+		switch {
+		case state.refs > 0:
+		case state.ephemeral:
+			delete(r.states, sessionKey)
+			closing = append(closing, state)
+		default:
+			state.idleSince = timeNow()
+		}
+		state.mu.Unlock()
 	}
+	closing = append(closing, r.pruneExpiredLocked(timeNow())...)
 	r.mu.Unlock()
 
-	if ok {
-		state.close()
-	}
+	closeResponsesWebsocketStates(closing)
 }
 
 func (r *responsesWebsocketRegistry) closeAll() {
@@ -113,6 +159,34 @@ func (r *responsesWebsocketRegistry) closeAll() {
 	r.mu.Unlock()
 
 	for _, state := range states {
+		state.close()
+	}
+}
+
+func (r *responsesWebsocketRegistry) pruneExpiredLocked(now time.Time) []*responsesWebsocketBridgeState {
+	if responsesWebsocketIdleGrace <= 0 {
+		return nil
+	}
+
+	var closing []*responsesWebsocketBridgeState
+	for key, state := range r.states {
+		state.mu.Lock()
+		expired := state.refs == 0 && !state.idleSince.IsZero() && now.Sub(state.idleSince) >= responsesWebsocketIdleGrace
+		state.mu.Unlock()
+		if !expired {
+			continue
+		}
+		delete(r.states, key)
+		closing = append(closing, state)
+	}
+	return closing
+}
+
+func closeResponsesWebsocketStates(states []*responsesWebsocketBridgeState) {
+	for _, state := range states {
+		if state == nil {
+			continue
+		}
 		state.close()
 	}
 }
@@ -136,7 +210,12 @@ func (p *Proxy) handleResponsesWebsocket(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	connectionKey := nextResponsesWebsocketConnectionKey()
-	defer p.wsBridge.release(connectionKey)
+	ephemeralHeld := false
+	defer func() {
+		if ephemeralHeld {
+			p.wsBridge.release(connectionKey)
+		}
+	}()
 	defer func() { _ = conn.Close() }()
 
 	conn.SetReadLimit(responsesWebsocketReadLimit)
@@ -149,14 +228,14 @@ func (p *Proxy) handleResponsesWebsocket(w http.ResponseWriter, r *http.Request)
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
 		}
-		if err := p.handleResponsesWebsocketMessage(conn, r, connectionKey, payload); err != nil {
+		if err := p.handleResponsesWebsocketMessage(conn, r, connectionKey, &ephemeralHeld, payload); err != nil {
 			slog.Debug("proxy websocket request failed", "error", err)
 			return
 		}
 	}
 }
 
-func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Request, connectionKey string, payload []byte) error {
+func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Request, connectionKey string, ephemeralHeld *bool, payload []byte) error {
 	rawBody, extraHeaders, err := sanitizeResponsesWebsocketRequest(payload)
 	if err != nil {
 		return writeResponsesWebsocketError(conn, http.StatusBadRequest, "invalid_request_error", "invalid websocket request: "+err.Error())
@@ -167,7 +246,14 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 	}
 
 	sessionKey := responsesWebsocketSessionKey(r, rawBody, connectionKey)
-	state := p.wsBridge.state(sessionKey, r.Header.Get(codexTurnStateHeader))
+	ephemeral := sessionKey == connectionKey
+	acquire := !ephemeral || !*ephemeralHeld
+	state := p.wsBridge.state(sessionKey, r.Header.Get(codexTurnStateHeader), ephemeral, acquire)
+	if ephemeral {
+		*ephemeralHeld = true
+	} else {
+		defer p.wsBridge.release(sessionKey)
+	}
 	runtime := p.runtimeForSession(sessionKey)
 
 	var req ResponsesRequest
@@ -290,8 +376,8 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 		websocketBody = websocketRewrite.Body
 	}
 
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state.relayMu.Lock()
+	defer state.relayMu.Unlock()
 
 	if err := p.relayResponsesWebsocketUpstream(conn, r, state, selection, websocketBody, alerts); err == nil {
 		return nil
@@ -312,8 +398,8 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 			upReq.Header.Add(header, value)
 		}
 	}
-	if state != nil && state.turnState != "" {
-		upReq.Header.Set(codexTurnStateHeader, state.turnState)
+	if turnState := state.turnStateSnapshot(); turnState != "" {
+		upReq.Header.Set(codexTurnStateHeader, turnState)
 	}
 
 	if selection.Target.APIKey != "" {
@@ -332,10 +418,8 @@ func (p *Proxy) handleResponsesWebsocketMessage(conn *websocket.Conn, r *http.Re
 		return writeResponsesWebsocketError(conn, http.StatusBadGateway, "server_error", "upstream error: "+err.Error())
 	}
 	defer func() { _ = upResp.Body.Close() }()
-	if state != nil {
-		if turnState := upResp.Header.Get(codexTurnStateHeader); turnState != "" {
-			state.turnState = turnState
-		}
+	if turnState := upResp.Header.Get(codexTurnStateHeader); turnState != "" {
+		state.setTurnState(turnState)
 	}
 
 	if upResp.StatusCode >= 500 {
@@ -433,7 +517,7 @@ func (p *Proxy) relayResponsesWebsocketUpstream(clientConn *websocket.Conn, r *h
 	}
 
 	if err := upstreamConn.WriteMessage(websocket.TextMessage, payload); err != nil {
-		state.resetUpstreamLocked()
+		state.resetUpstream()
 		return err
 	}
 
@@ -441,7 +525,7 @@ func (p *Proxy) relayResponsesWebsocketUpstream(clientConn *websocket.Conn, r *h
 	for {
 		msgType, message, err := upstreamConn.ReadMessage()
 		if err != nil {
-			state.resetUpstreamLocked()
+			state.resetUpstream()
 			return err
 		}
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
@@ -461,12 +545,18 @@ func (p *Proxy) relayResponsesWebsocketUpstream(clientConn *websocket.Conn, r *h
 }
 
 func (p *Proxy) ensureResponsesWebsocketUpstream(r *http.Request, state *responsesWebsocketBridgeState, selection targetSelection) (*websocket.Conn, error) {
+	state.mu.Lock()
 	if state.upstream != nil && state.upstreamBaseURL == selection.Target.BaseURL {
-		return state.upstream, nil
+		upstream := state.upstream
+		state.mu.Unlock()
+		return upstream, nil
 	}
 	if state.upstream != nil {
 		state.resetUpstreamLocked()
 	}
+	sessionKey := state.sessionKey
+	turnState := state.turnState
+	state.mu.Unlock()
 
 	upstreamURL, err := responsesWebsocketURL(selection.Target.BaseURL)
 	if err != nil {
@@ -475,19 +565,19 @@ func (p *Proxy) ensureResponsesWebsocketUpstream(r *http.Request, state *respons
 
 	headers := make(http.Header)
 	forwardOpenAICompatibilityHeaders(headers, r.Header)
-	if state.sessionKey != "" {
+	if sessionKey != "" {
 		if headers.Get("session_id") == "" {
-			headers.Set("session_id", state.sessionKey)
+			headers.Set("session_id", sessionKey)
 		}
 		if headers.Get("X-Client-Request-Id") == "" {
-			headers.Set("X-Client-Request-Id", state.sessionKey)
+			headers.Set("X-Client-Request-Id", sessionKey)
 		}
 	}
 	if selection.Capabilities.Provider == "openai" && !responsesWebsocketBetaHeaderPresent(headers) {
 		headers.Add("OpenAI-Beta", openAIResponsesWebsocketBetaHeaderValue)
 	}
-	if state.turnState != "" {
-		headers.Set(codexTurnStateHeader, state.turnState)
+	if turnState != "" {
+		headers.Set(codexTurnStateHeader, turnState)
 	}
 	if selection.Target.APIKey != "" {
 		headers.Set("Authorization", "Bearer "+selection.Target.APIKey)
@@ -504,12 +594,14 @@ func (p *Proxy) ensureResponsesWebsocketUpstream(r *http.Request, state *respons
 	}
 	if resp != nil {
 		if turnState := resp.Header.Get(codexTurnStateHeader); turnState != "" {
-			state.turnState = turnState
+			state.setTurnState(turnState)
 		}
 	}
 
+	state.mu.Lock()
 	state.upstream = upstreamConn
 	state.upstreamBaseURL = selection.Target.BaseURL
+	state.mu.Unlock()
 	return upstreamConn, nil
 }
 

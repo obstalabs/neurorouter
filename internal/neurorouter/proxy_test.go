@@ -836,16 +836,16 @@ func TestHandleMessages_AnthropicProtocolPreservesMixedToolTurnDuringStaleReadCl
 	}
 
 	firstAssistant := string(capturedReq.Messages[0].Content)
-	if strings.Contains(firstAssistant, "toolu_read_old") {
-		t.Fatalf("stale read tool_use should not reach upstream: %s", firstAssistant)
+	if !strings.Contains(firstAssistant, "toolu_read_old") {
+		t.Fatalf("distinct read tool_use should remain upstream: %s", firstAssistant)
 	}
 	if !strings.Contains(firstAssistant, "toolu_grep") {
 		t.Fatalf("live grep tool_use should remain upstream: %s", firstAssistant)
 	}
 
 	firstUser := string(capturedReq.Messages[1].Content)
-	if strings.Contains(firstUser, "toolu_read_old") {
-		t.Fatalf("stale read tool_result should not reach upstream: %s", firstUser)
+	if !strings.Contains(firstUser, "toolu_read_old") {
+		t.Fatalf("distinct read tool_result should remain upstream: %s", firstUser)
 	}
 	if !strings.Contains(firstUser, "toolu_grep") {
 		t.Fatalf("live grep tool_result should remain upstream: %s", firstUser)

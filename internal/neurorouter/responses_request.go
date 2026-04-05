@@ -584,9 +584,10 @@ func cleanupStructuredResponsesItems(items []json.RawMessage, cfg FilterConfig, 
 }
 
 type structuredCallRecord struct {
-	Index  int
-	CallID string
-	Path   string
+	Index     int
+	CallID    string
+	Path      string
+	Signature string
 }
 
 type structuredSearchRecord struct {
@@ -612,7 +613,7 @@ type structuredShellAttempt struct {
 
 func dropStructuredStaleReadItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
 	reads := make(map[string][]structuredCallRecord)
-	writes := make(map[string]int)
+	writes := make(map[string][]int)
 	outputsByCallID := make(map[string][]int)
 
 	for i, rawItem := range items {
@@ -629,9 +630,14 @@ func dropStructuredStaleReadItems(items []json.RawMessage) ([]json.RawMessage, b
 			path := extractStructuredPath(args)
 			switch {
 			case isStructuredReadToolName(name) && path != "" && callID != "":
-				reads[path] = append(reads[path], structuredCallRecord{Index: i, CallID: callID, Path: path})
+				reads[path] = append(reads[path], structuredCallRecord{
+					Index:     i,
+					CallID:    callID,
+					Path:      path,
+					Signature: structuredReadSignature(args, path),
+				})
 			case isStructuredWriteToolName(name) && path != "":
-				writes[path] = i
+				writes[path] = append(writes[path], i)
 			}
 		case "custom_tool_call":
 			name, _ := rawJSONStringValue(item["name"])
@@ -639,9 +645,14 @@ func dropStructuredStaleReadItems(items []json.RawMessage) ([]json.RawMessage, b
 			path := extractStructuredPath(input)
 			switch {
 			case isStructuredReadToolName(name) && path != "" && callID != "":
-				reads[path] = append(reads[path], structuredCallRecord{Index: i, CallID: callID, Path: path})
+				reads[path] = append(reads[path], structuredCallRecord{
+					Index:     i,
+					CallID:    callID,
+					Path:      path,
+					Signature: structuredReadSignature(input, path),
+				})
 			case isStructuredWriteToolName(name) && path != "":
-				writes[path] = i
+				writes[path] = append(writes[path], i)
 			}
 		case "function_call_output", "custom_tool_call_output":
 			if callID != "" {
@@ -652,15 +663,7 @@ func dropStructuredStaleReadItems(items []json.RawMessage) ([]json.RawMessage, b
 
 	drop := make(map[int]bool)
 	for path, records := range reads {
-		if len(records) <= 1 {
-			continue
-		}
-		last := records[len(records)-1]
-		latestWrite, hasWrite := writes[path]
-		for _, record := range records[:len(records)-1] {
-			if hasWrite && latestWrite > record.Index && latestWrite < last.Index {
-				continue
-			}
+		for _, record := range staleStructuredReadRecords(records, writes[path]) {
 			drop[record.Index] = true
 			for _, outputIndex := range outputsByCallID[record.CallID] {
 				drop[outputIndex] = true
@@ -672,6 +675,53 @@ func dropStructuredStaleReadItems(items []json.RawMessage) ([]json.RawMessage, b
 		return items, false, nil
 	}
 	return filterRawResponsesItems(items, drop), true, nil
+}
+
+func staleStructuredReadRecords(records []structuredCallRecord, writeIndices []int) []structuredCallRecord {
+	if len(records) <= 1 {
+		return nil
+	}
+
+	stale := make([]structuredCallRecord, 0, len(records)-1)
+	readPos := 0
+	for _, writeIdx := range writeIndices {
+		segmentStart := readPos
+		for readPos < len(records) && records[readPos].Index < writeIdx {
+			readPos++
+		}
+		stale = append(stale, staleStructuredReadSegment(records[segmentStart:readPos])...)
+	}
+	stale = append(stale, staleStructuredReadSegment(records[readPos:])...)
+	return stale
+}
+
+func staleStructuredReadSegment(records []structuredCallRecord) []structuredCallRecord {
+	if len(records) <= 1 {
+		return nil
+	}
+
+	bySignature := make(map[string][]structuredCallRecord)
+	order := make([]string, 0, len(records))
+	for _, record := range records {
+		signature := strings.TrimSpace(record.Signature)
+		if signature == "" {
+			signature = fmt.Sprintf("unique:%d", record.Index)
+		}
+		if _, exists := bySignature[signature]; !exists {
+			order = append(order, signature)
+		}
+		bySignature[signature] = append(bySignature[signature], record)
+	}
+
+	stale := make([]structuredCallRecord, 0, len(records)-1)
+	for _, signature := range order {
+		duplicates := bySignature[signature]
+		if len(duplicates) <= 1 {
+			continue
+		}
+		stale = append(stale, duplicates[:len(duplicates)-1]...)
+	}
+	return stale
 }
 
 func dropStructuredStaleSearchItems(items []json.RawMessage) ([]json.RawMessage, bool, error) {
@@ -1625,6 +1675,14 @@ func extractStructuredPath(raw string) string {
 	}
 	path, _ = rawJSONStringValue(doc["path"])
 	return path
+}
+
+func structuredReadSignature(raw string, fallbackPath string) string {
+	canonical, err := canonicalizeRawJSON(json.RawMessage(raw))
+	if err == nil && canonical != "" {
+		return canonical
+	}
+	return fallbackPath
 }
 
 func structuredSearchSignature(item map[string]json.RawMessage) (string, bool, error) {

@@ -341,7 +341,34 @@ func TestFilterStaleReads(t *testing.T) {
 		}
 	})
 
-	t.Run("removes only stale claude read blocks from mixed tool turns", func(t *testing.T) {
+	t.Run("deduplicates only identical reads within each write-delimited segment", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `{"name":"Read","id":"t1","input":{"file_path":"/foo/bar.go"}}`},
+			{Role: "assistant", Content: `{"name":"Read","id":"t2","input":{"file_path":"/foo/bar.go","offset":100,"limit":50}}`},
+			{Role: "assistant", Content: `{"name":"Read","id":"t3","input":{"file_path":"/foo/bar.go"}}`},
+			{Role: "assistant", Content: `{"name":"Write","id":"t4","input":{"file_path":"/foo/bar.go"}}`},
+			{Role: "assistant", Content: `{"name":"Read","id":"t5","input":{"file_path":"/foo/bar.go","offset":200,"limit":20}}`},
+		}
+
+		out := FilterStaleReads(msgs)
+		if len(out) != 4 {
+			t.Fatalf("expected only the identical pre-write duplicate removed, got %d messages", len(out))
+		}
+		if strings.Contains(out[0].Content, `"id":"t1"`) {
+			t.Fatalf("earlier identical read in the same segment should be removed: %#v", out)
+		}
+		if !strings.Contains(out[0].Content, `"id":"t2"`) {
+			t.Fatalf("distinct read before the write should remain: %#v", out)
+		}
+		if !strings.Contains(out[1].Content, `"id":"t3"`) {
+			t.Fatalf("latest duplicate before the write should remain: %#v", out)
+		}
+		if !strings.Contains(out[3].Content, `"id":"t5"`) {
+			t.Fatalf("post-write distinct read should remain: %#v", out)
+		}
+	})
+
+	t.Run("preserves distinct claude read blocks in mixed tool turns", func(t *testing.T) {
 		msgs := []ChatMessage{
 			{
 				Role: "assistant",
@@ -366,23 +393,23 @@ func TestFilterStaleReads(t *testing.T) {
 
 		out := FilterStaleReads(msgs)
 		if len(out) != 4 {
-			t.Fatalf("expected 4 messages with mixed turn preserved, got %d", len(out))
+			t.Fatalf("expected mixed turn to remain intact, got %d messages", len(out))
 		}
-		if strings.Contains(out[0].Content, "toolu_read_old") {
-			t.Fatalf("stale read tool_use should be removed from assistant turn: %s", out[0].Content)
+		if !strings.Contains(out[0].Content, "toolu_read_old") {
+			t.Fatalf("distinct earlier read should remain in assistant turn: %s", out[0].Content)
 		}
 		if !strings.Contains(out[0].Content, "toolu_grep") {
 			t.Fatalf("live grep tool_use should remain in assistant turn: %s", out[0].Content)
 		}
-		if strings.Contains(out[1].Content, "toolu_read_old") {
-			t.Fatalf("stale read tool_result should be removed from user turn: %s", out[1].Content)
+		if !strings.Contains(out[1].Content, "toolu_read_old") {
+			t.Fatalf("distinct earlier read result should remain in user turn: %s", out[1].Content)
 		}
 		if !strings.Contains(out[1].Content, "toolu_grep") {
 			t.Fatalf("live grep tool_result should remain in user turn: %s", out[1].Content)
 		}
 	})
 
-	t.Run("drops stale claude read pair when turn contains only the stale read", func(t *testing.T) {
+	t.Run("preserves distinct claude read pairs for the same file", func(t *testing.T) {
 		msgs := []ChatMessage{
 			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_read_old","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":110,"limit":30}}]`},
 			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_read_old","content":"old cleanlive snippet"}]`},
@@ -391,11 +418,28 @@ func TestFilterStaleReads(t *testing.T) {
 		}
 
 		out := FilterStaleReads(msgs)
+		if len(out) != 4 {
+			t.Fatalf("expected both distinct read pairs to remain, got %d messages", len(out))
+		}
+		if !strings.Contains(out[0].Content, "toolu_read_old") || !strings.Contains(out[1].Content, "toolu_read_old") {
+			t.Fatalf("distinct earlier Claude read pair should remain: %#v", out)
+		}
+	})
+
+	t.Run("drops duplicate claude read pairs for the same file segment", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_read_old","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":110,"limit":30}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_read_old","content":"old cleanlive snippet"}]`},
+			{Role: "assistant", Content: `[{"type":"tool_use","id":"toolu_read_new","name":"Read","input":{"file_path":"/repo/internal/editor/cleanlive.go","offset":110,"limit":30}}]`},
+			{Role: "user", Content: `[{"type":"tool_result","tool_use_id":"toolu_read_new","content":"new cleanlive snippet"}]`},
+		}
+
+		out := FilterStaleReads(msgs)
 		if len(out) != 2 {
-			t.Fatalf("expected only the latest read pair to remain, got %d messages", len(out))
+			t.Fatalf("expected only the latest duplicate read pair to remain, got %d messages", len(out))
 		}
 		if strings.Contains(out[0].Content, "toolu_read_old") || strings.Contains(out[1].Content, "toolu_read_old") {
-			t.Fatalf("stale Claude read pair should be removed: %#v", out)
+			t.Fatalf("duplicate Claude read pair should be removed: %#v", out)
 		}
 	})
 

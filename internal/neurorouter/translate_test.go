@@ -944,6 +944,88 @@ func TestRewriteResponsesRequestWithConfig_StripsStructuredStaleSearchChains(t *
 	}
 }
 
+func TestRewriteResponsesRequestWithConfig_PreservesDistinctReadsWithinWriteSegment(t *testing.T) {
+	rawBody := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"function_call","call_id":"read_call_1","name":"Read","arguments":"{\"file_path\":\"/repo/main.go\"}"},
+			{"type":"function_call_output","call_id":"read_call_1","output":"oldest"},
+			{"type":"function_call","call_id":"read_call_2","name":"Read","arguments":"{\"file_path\":\"/repo/main.go\",\"offset\":100,\"limit\":40}"},
+			{"type":"function_call_output","call_id":"read_call_2","output":"distinct before write"},
+			{"type":"function_call","call_id":"read_call_3","name":"Read","arguments":"{\"file_path\":\"/repo/main.go\"}"},
+			{"type":"function_call_output","call_id":"read_call_3","output":"latest duplicate before write"},
+			{"type":"function_call","call_id":"write_call_1","name":"Write","arguments":"{\"file_path\":\"/repo/main.go\"}"},
+			{"type":"function_call","call_id":"read_call_4","name":"Read","arguments":"{\"file_path\":\"/repo/main.go\"}"},
+			{"type":"function_call_output","call_id":"read_call_4","output":"after write"},
+			{"type":"message","role":"user","content":"Continue."}
+		]
+	}`)
+
+	req := &ResponsesRequest{
+		Input: []InputItem{
+			{Type: "function_call"},
+			{Type: "function_call_output"},
+			{Type: "function_call"},
+			{Type: "function_call_output"},
+			{Type: "function_call"},
+			{Type: "function_call_output"},
+			{Type: "function_call"},
+			{Type: "function_call"},
+			{Type: "function_call_output"},
+			{Type: "message", Role: "user", Content: json.RawMessage(`"Continue."`)},
+		},
+	}
+
+	original, err := ExtractRequestMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	result, err := RewriteResponsesRequestWithConfig(rawBody, original, original, FilterConfig{
+		StaleReads: true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if got, want := strings.Join(result.FiltersRun, ","), "stale_reads"; got != want {
+		t.Fatalf("filters run: got %q, want %q", got, want)
+	}
+
+	var rewritten map[string]any
+	if err := json.Unmarshal(result.Body, &rewritten); err != nil {
+		t.Fatalf("decode rewritten: %v", err)
+	}
+	input := rewritten["input"].([]any)
+	if len(input) != 8 {
+		t.Fatalf("input length: got %d, want 8", len(input))
+	}
+	if input[0].(map[string]any)["call_id"] != "read_call_2" {
+		t.Fatalf("distinct read before write should remain, got %+v", input[0])
+	}
+	if input[1].(map[string]any)["call_id"] != "read_call_2" {
+		t.Fatalf("matching distinct output before write should remain, got %+v", input[1])
+	}
+	if input[2].(map[string]any)["call_id"] != "read_call_3" {
+		t.Fatalf("latest duplicate before write should remain, got %+v", input[2])
+	}
+	if input[3].(map[string]any)["call_id"] != "read_call_3" {
+		t.Fatalf("matching latest duplicate output should remain, got %+v", input[3])
+	}
+	if input[4].(map[string]any)["call_id"] != "write_call_1" {
+		t.Fatalf("write should remain, got %+v", input[4])
+	}
+	if input[5].(map[string]any)["call_id"] != "read_call_4" {
+		t.Fatalf("post-write read should remain, got %+v", input[5])
+	}
+	if input[6].(map[string]any)["call_id"] != "read_call_4" {
+		t.Fatalf("matching post-write output should remain, got %+v", input[6])
+	}
+	if input[7].(map[string]any)["type"] != "message" {
+		t.Fatalf("user message should remain, got %+v", input[7])
+	}
+}
+
 func TestRewriteResponsesRequestWithConfig_CompactsOversizedSearchOutputs(t *testing.T) {
 	tools := make([]string, 0, 40)
 	for i := 0; i < 40; i++ {
