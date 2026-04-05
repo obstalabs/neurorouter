@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.32] - 2026-04-05
+
+### Fixed
+- `stale_reads` now preserves distinct read requests for the same file within each write-delimited segment and only drops earlier exact duplicates, preventing long Claude sessions from spiraling into re-read loops after the proxy strips too much file context
+- Responses websocket bridge state now releases explicit-session state after disconnect with an idle-grace reuse window, stops leaking fallback per-connection session references, and no longer holds bridge state mutexes across upstream websocket or HTTP fallback I/O
+
 ## [0.1.31] - 2026-04-05
 
 ### Fixed
