@@ -40,6 +40,72 @@ func anthropicRewriteStatusCode(err error) int {
 	return http.StatusInternalServerError
 }
 
+func recoverHTTPPanics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("proxy handler panic", "method", r.Method, "path", r.URL.Path, "panic", rec)
+				writeError(w, http.StatusBadGateway, "internal proxy error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func streamContextFromResponse(resp *http.Response) context.Context {
+	if resp != nil && resp.Request != nil {
+		if ctx := resp.Request.Context(); ctx != nil {
+			return ctx
+		}
+	}
+	return context.Background()
+}
+
+func streamContextCanceled(ctx context.Context, where string) bool {
+	if ctx == nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		slog.Info("proxy client disconnected", "where", where, "error", ctx.Err())
+		return true
+	default:
+		return false
+	}
+}
+
+func writeResponseBytes(w http.ResponseWriter, data []byte, where string) bool {
+	if _, err := w.Write(data); err != nil {
+		slog.Warn("proxy write failed", "where", where, "error", err)
+		return false
+	}
+	return true
+}
+
+func writeResponseString(w io.Writer, data string, where string) bool {
+	if _, err := fmt.Fprint(w, data); err != nil {
+		slog.Warn("proxy stream write failed", "where", where, "error", err)
+		return false
+	}
+	return true
+}
+
+func copyResponseBody(w http.ResponseWriter, body io.Reader, where string) bool {
+	if _, err := io.Copy(w, body); err != nil {
+		slog.Warn("proxy body copy failed", "where", where, "error", err)
+		return false
+	}
+	return true
+}
+
+func encodeResponseJSON(w http.ResponseWriter, payload any, where string) bool {
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		slog.Warn("proxy json encode failed", "where", where, "error", err)
+		return false
+	}
+	return true
+}
+
 // Target describes an upstream API endpoint.
 type Target struct {
 	BaseURL string // e.g. "https://api.deepseek.com"
@@ -185,7 +251,7 @@ func (p *Proxy) Start() (string, error) {
 
 	p.mu.Lock()
 	p.addr = ln.Addr().String()
-	p.srv = &http.Server{Handler: mux}
+	p.srv = &http.Server{Handler: recoverHTTPPanics(mux)}
 	p.mu.Unlock()
 
 	go func() {
@@ -253,7 +319,7 @@ func (p *Proxy) Addr() string {
 
 func (p *Proxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	writeResponseBytes(w, []byte(`{"status":"ok"}`), "handle health")
 }
 
 func (p *Proxy) handleModels(w http.ResponseWriter, _ *http.Request) {
@@ -337,23 +403,23 @@ func (p *Proxy) handleModels(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	encodeResponseJSON(w, map[string]any{
 		"object": "list",
 		"data":   openAIModels,
 		"models": codexModels,
-	})
+	}, "handle models")
 }
 
 func (p *Proxy) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 	runtime := p.runtimeForManagement(r)
 	w.Header().Set("Content-Type", "application/json")
 	if runtime.pipeline == nil {
-		_, _ = w.Write([]byte(`{"suggestions":[]}`))
+		writeResponseBytes(w, []byte(`{"suggestions":[]}`), "handle suggestions empty")
 		return
 	}
 	suggestions := p.filteredSuggestions(runtime)
 	data, _ := json.Marshal(map[string]any{"suggestions": suggestions})
-	_, _ = w.Write(data)
+	writeResponseBytes(w, data, "handle suggestions")
 }
 
 func (p *Proxy) handleAudit(w http.ResponseWriter, r *http.Request) {
@@ -382,7 +448,7 @@ func (p *Proxy) handleAudit(w http.ResponseWriter, r *http.Request) {
 		"count":                       len(entries),
 		"input_price_per_million_usd": NormalizeInputPricePerMillionUSD(p.cfg.InputPricePerMillionUSD),
 	})
-	_, _ = w.Write(data)
+	writeResponseBytes(w, data, "handle audit")
 }
 
 func stripAuditSecretDiagnostics(entries []AuditEntry) []AuditEntry {
@@ -435,10 +501,10 @@ func (p *Proxy) handleDNDStatus(w http.ResponseWriter, r *http.Request) {
 	runtime := p.runtimeForManagement(r)
 	w.Header().Set("Content-Type", "application/json")
 	if runtime.dnd == nil {
-		_ = json.NewEncoder(w).Encode(DNDSnapshot{Source: DNDSourceOff, Status: "off"})
+		encodeResponseJSON(w, DNDSnapshot{Source: DNDSourceOff, Status: "off"}, "handle dnd status off")
 		return
 	}
-	_ = json.NewEncoder(w).Encode(runtime.dnd.Snapshot())
+	encodeResponseJSON(w, runtime.dnd.Snapshot(), "handle dnd status")
 }
 
 func (p *Proxy) handleDNDToggle(w http.ResponseWriter, r *http.Request) {
@@ -457,10 +523,10 @@ func (p *Proxy) handleDNDToggle(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if runtime.dnd == nil {
-		_ = json.NewEncoder(w).Encode(DNDSnapshot{Source: DNDSourceOff, Status: "off"})
+		encodeResponseJSON(w, DNDSnapshot{Source: DNDSourceOff, Status: "off"}, "handle dnd toggle off")
 		return
 	}
-	_ = json.NewEncoder(w).Encode(runtime.dnd.Snapshot())
+	encodeResponseJSON(w, runtime.dnd.Snapshot(), "handle dnd toggle")
 }
 
 func (p *Proxy) filteredSuggestions(runtime *sessionRuntime) []Suggestion {
@@ -635,7 +701,7 @@ func (p *Proxy) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		data, _ := json.Marshal(result)
-		_, _ = w.Write(data)
+		writeResponseBytes(w, data, "handle anthropic dry run")
 		return
 	}
 
@@ -685,7 +751,7 @@ func (p *Proxy) handleMessages(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", contentType)
 		}
 		w.WriteHeader(upResp.StatusCode)
-		_, _ = io.Copy(w, upResp.Body)
+		copyResponseBody(w, upResp.Body, "anthropic upstream error passthrough")
 		return
 	}
 
@@ -848,7 +914,7 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 		}
 		w.Header().Set("Content-Type", "application/json")
 		data, _ := json.Marshal(result)
-		_, _ = w.Write(data)
+		writeResponseBytes(w, data, "handle responses dry run")
 		return
 	}
 
@@ -918,17 +984,22 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 		if runtime.dnd != nil {
 			runtime.dnd.RecordError()
 		}
-		body, _ := io.ReadAll(upResp.Body)
+		body, readErr := io.ReadAll(upResp.Body)
+		if readErr != nil {
+			slog.Warn("proxy: read upstream error response", "error", readErr)
+			writeError(w, http.StatusBadGateway, "read upstream error response: "+readErr.Error())
+			return
+		}
 		if rewritten, ok := oauthCompatibilityError(selection.Target.APIKey, r.Header, upResp.StatusCode, body); ok {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			encodeResponseJSON(w, map[string]any{
 				"error": map[string]any{
 					"type":    "invalid_request_error",
 					"code":    "client_auth_unsupported",
 					"message": rewritten,
 				},
-			})
+			}, "responses oauth compatibility error")
 			return
 		}
 
@@ -936,7 +1007,7 @@ func (p *Proxy) handleResponsesForUpstream(w http.ResponseWriter, r *http.Reques
 			w.Header().Set("Content-Type", contentType)
 		}
 		w.WriteHeader(upResp.StatusCode)
-		_, _ = w.Write(body)
+		writeResponseBytes(w, body, "responses upstream error passthrough")
 		return
 	}
 
@@ -1016,7 +1087,7 @@ func (p *Proxy) handleNonStreamingResponse(w http.ResponseWriter, upResp *http.R
 	resp := TranslateResponse(&chatResp)
 	prependAlertsToResponsesAPIResponse(resp, alerts)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	encodeResponseJSON(w, resp, "handle non-streaming response")
 }
 
 func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, upResp *http.Response, alerts []Alert) {
@@ -1033,11 +1104,14 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, upResp *http.Resp
 
 	translator := NewStreamTranslator()
 	alertState := newResponsesAlertStreamState(alerts)
+	ctx := streamContextFromResponse(upResp)
 	scanner := bufio.NewScanner(upResp.Body)
-	// 256KB buffer for large chunks
-	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 0, 256*1024), 2*1024*1024) // 2MB max for large tool_use payloads
 
 	for scanner.Scan() {
+		if streamContextCanceled(ctx, "responses translation stream") {
+			return
+		}
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -1061,13 +1135,25 @@ func (p *Proxy) handleStreamingResponse(w http.ResponseWriter, upResp *http.Resp
 					ev.Data = string(rewritten)
 				}
 			}
-			_, _ = fmt.Fprint(w, ev.Format())
+			if !writeResponseString(w, ev.Format(), "responses translation stream") {
+				return
+			}
 		}
 		flusher.Flush()
+		if streamContextCanceled(ctx, "responses translation stream") {
+			return
+		}
 
 		if done {
 			break
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			slog.Info("proxy client disconnected", "where", "responses translation stream", "error", ctxErr)
+			return
+		}
+		slog.Warn("proxy: SSE stream read error in translation path", "error", err)
 	}
 }
 
@@ -1080,7 +1166,7 @@ func (p *Proxy) handlePassthroughResponse(w http.ResponseWriter, upResp *http.Re
 	w.WriteHeader(upResp.StatusCode)
 
 	if len(alerts) == 0 {
-		_, _ = io.Copy(w, upResp.Body)
+		copyResponseBody(w, upResp.Body, "responses passthrough response")
 		return
 	}
 
@@ -1092,10 +1178,10 @@ func (p *Proxy) handlePassthroughResponse(w http.ResponseWriter, upResp *http.Re
 	rewritten, err := injectAlertsIntoResponsesBody(body, alerts)
 	if err != nil {
 		slog.Debug("proxy: inject alerts into native response", "error", err)
-		_, _ = w.Write(body)
+		writeResponseBytes(w, body, "responses passthrough response fallback")
 		return
 	}
-	_, _ = w.Write(rewritten)
+	writeResponseBytes(w, rewritten, "responses passthrough response rewritten")
 }
 
 func (p *Proxy) handlePassthroughStreamingResponse(w http.ResponseWriter, upResp *http.Response, alerts []Alert) {
@@ -1122,14 +1208,23 @@ func (p *Proxy) handlePassthroughStreamingResponse(w http.ResponseWriter, upResp
 	}
 
 	w.WriteHeader(upResp.StatusCode)
+	ctx := streamContextFromResponse(upResp)
 
 	if len(alerts) == 0 {
 		buf := make([]byte, 32*1024)
 		for {
+			if streamContextCanceled(ctx, "responses passthrough stream") {
+				return
+			}
 			n, err := upResp.Body.Read(buf)
 			if n > 0 {
-				_, _ = w.Write(buf[:n])
+				if !writeResponseBytes(w, buf[:n], "responses passthrough stream") {
+					return
+				}
 				flusher.Flush()
+				if streamContextCanceled(ctx, "responses passthrough stream") {
+					return
+				}
 			}
 			if err != nil {
 				if err != io.EOF {
@@ -1147,6 +1242,9 @@ func (p *Proxy) handlePassthroughStreamingResponse(w http.ResponseWriter, upResp
 
 	currentEvent := ""
 	for scanner.Scan() {
+		if streamContextCanceled(ctx, "responses passthrough stream") {
+			return
+		}
 		line := scanner.Text()
 		switch {
 		case strings.HasPrefix(line, "event: "):
@@ -1163,12 +1261,21 @@ func (p *Proxy) handlePassthroughStreamingResponse(w http.ResponseWriter, upResp
 			currentEvent = ""
 		}
 
-		_, _ = fmt.Fprint(w, line+"\n")
+		if !writeResponseString(w, line+"\n", "responses passthrough stream") {
+			return
+		}
 		if line == "" {
 			flusher.Flush()
+			if streamContextCanceled(ctx, "responses passthrough stream") {
+				return
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			slog.Info("proxy client disconnected", "where", "responses passthrough stream", "error", ctxErr)
+			return
+		}
 		slog.Debug("proxy: native stream ended with error", "error", err)
 	}
 }
@@ -1479,5 +1586,5 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	resp := map[string]any{"error": map[string]any{"message": msg, "code": code}}
-	_ = json.NewEncoder(w).Encode(resp)
+	encodeResponseJSON(w, resp, "write error")
 }

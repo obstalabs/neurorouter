@@ -17,6 +17,30 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+type failingStreamWriter struct {
+	header http.Header
+	status int
+	writes int
+}
+
+func (w *failingStreamWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingStreamWriter) WriteHeader(statusCode int) {
+	w.status = statusCode
+}
+
+func (w *failingStreamWriter) Write(_ []byte) (int, error) {
+	w.writes++
+	return 0, io.ErrClosedPipe
+}
+
+func (w *failingStreamWriter) Flush() {}
+
 func TestHandleResponses_NonStreaming(t *testing.T) {
 	// mock upstream Chat Completions API
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1160,6 +1184,55 @@ func TestHandleResponses_Streaming(t *testing.T) {
 	}
 	if !strings.Contains(events, "hello world") {
 		t.Fatal("missing full text in completed event")
+	}
+}
+
+func TestHandleResponses_StreamingStopsOnWriteError(t *testing.T) {
+	chunk := ChatChunk{
+		ID:    "c1",
+		Model: "test",
+		Choices: []ChunkChoice{{
+			Delta: ChunkDelta{Role: "assistant", Content: "hello"},
+		}},
+	}
+	bodyBytes, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("marshal chunk: %v", err)
+	}
+
+	upResp := &http.Response{
+		Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:   io.NopCloser(strings.NewReader("data: " + string(bodyBytes) + "\n\n")),
+		Request: httptest.NewRequest(
+			http.MethodPost,
+			"https://example.invalid/v1/chat/completions",
+			nil,
+		),
+	}
+
+	writer := &failingStreamWriter{}
+	p := NewProxy(ProxyConfig{})
+	p.handleStreamingResponse(writer, upResp, nil)
+
+	if writer.writes != 1 {
+		t.Fatalf("writes after first stream write error: got %d, want 1", writer.writes)
+	}
+}
+
+func TestRecoverHTTPPanics_ReturnsBadGateway(t *testing.T) {
+	handler := recoverHTTPPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/panic", nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d, want %d", resp.Code, http.StatusBadGateway)
+	}
+	if !strings.Contains(resp.Body.String(), "internal proxy error") {
+		t.Fatalf("body: %s", resp.Body.String())
 	}
 }
 
