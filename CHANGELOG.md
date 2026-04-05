@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.31] - 2026-04-05
+
+### Fixed
+- Codex translation streaming now uses a 2MB scanner buffer and reports `scanner.Err()` instead of silently truncating oversized SSE events
+- Proxy handlers now recover panics into structured local `502` responses instead of dropping connections without an error body
+- Anthropic and Codex streaming forwards now stop reading upstream when the downstream client disconnects or a stream write fails, preventing silent retry-driven budget burn
+- Non-streaming passthrough paths now log copy and response-write failures instead of discarding them silently
+
 ## [0.1.30] - 2026-04-05
 
 ### Fixed
