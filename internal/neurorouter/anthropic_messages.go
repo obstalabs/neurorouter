@@ -205,6 +205,18 @@ func RewriteAnthropicMessagesRequest(rawBody []byte, originalMsgs, filteredMsgs 
 		body = compacted.Bytes()
 	}
 
+	// If the rewrite is still larger than the original (for example due to
+	// HTML-safe escaping or key reordering), fall back to the original body.
+	// Cleanup should never make the forwarded request larger than what the
+	// client already sent.
+	if len(body) >= len(rawBody) {
+		return &AnthropicMessagesRewriteResult{
+			Body:        append([]byte(nil), rawBody...),
+			BytesBefore: len(rawBody),
+			BytesAfter:  len(rawBody),
+		}, nil
+	}
+
 	return &AnthropicMessagesRewriteResult{
 		Body:        body,
 		BytesBefore: len(rawBody),

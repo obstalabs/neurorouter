@@ -142,6 +142,34 @@ func TestRewriteAnthropicMessagesRequest_SystemReminderFilterShrinksTextBlocks(t
 	}
 }
 
+func TestRewriteAnthropicMessagesRequest_FallsBackToOriginalBodyWhenRewriteGrows(t *testing.T) {
+	rawBody := []byte(`{"model":"claude-sonnet","metadata":"&&&&&&&&&&","messages":[{"role":"user","content":[{"type":"text","text":"AB"}]}]}`)
+
+	req, err := UnmarshalMessagesRequest(rawBody)
+	if err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+
+	original, err := ExtractAnthropicMessages(req)
+	if err != nil {
+		t.Fatalf("extract original: %v", err)
+	}
+
+	filtered := append([]ChatMessage(nil), original...)
+	filtered[0].Content = "A"
+	rewrite, err := RewriteAnthropicMessagesRequest(rawBody, original, filtered)
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if string(rewrite.Body) != string(rawBody) {
+		t.Fatalf("expected original body fallback, got %s", string(rewrite.Body))
+	}
+	if rewrite.BytesBefore != len(rawBody) || rewrite.BytesAfter != len(rawBody) {
+		t.Fatalf("rewrite sizes: before=%d after=%d want=%d", rewrite.BytesBefore, rewrite.BytesAfter, len(rawBody))
+	}
+}
+
 func TestRewriteAnthropicMessages_EmptyTextBlockAfterSystemReminderStrip(t *testing.T) {
 	body := []byte(`{
 		"model": "claude-opus-4-6",

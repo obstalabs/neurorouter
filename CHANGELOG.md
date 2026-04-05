@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.30] - 2026-04-05
+
 ### Fixed
+- Ported the Anthropic rewrite body-size guard from Pro so the proxy now keeps the original raw request whenever cleanup reserialization would still make the forwarded body larger because of HTML escaping or key reordering
+- Added regression coverage proving rewritten Anthropic requests fall back to the original body unchanged instead of surfacing `+bytes` in proxy logs
 - Anthropic rewrite now compacts filtered request JSON before forwarding, preventing small positive byte deltas after reminder cleanup on the current unreleased head
 - Anthropic rewrite now merges adjacent same-role messages introduced by filtered message removal, preserving valid role alternation instead of surfacing rewrite failures
 - Remaining Anthropic rewrite validation failures now return local `400` responses instead of `500`, so clients stop retrying malformed rewritten requests
