@@ -183,8 +183,13 @@ func RewriteAnthropicMessagesRequest(rawBody []byte, originalMsgs, filteredMsgs 
 	}
 	req.Messages = rewritten
 
+	req.Messages, rewrittenOriginalIdx, err = mergeAdjacentAnthropicMessages(req.Messages, rewrittenOriginalIdx)
+	if err != nil {
+		return nil, &anthropicRewriteValidationError{err: err}
+	}
+
 	if err := validateAnthropicRewrittenRequest(req, rewrittenOriginalIdx); err != nil {
-		return nil, err
+		return nil, &anthropicRewriteValidationError{err: err}
 	}
 
 	body, err := MarshalMessagesRequest(req)
@@ -214,8 +219,117 @@ type AnthropicMessagesRewriteResult struct {
 	BytesAfter  int
 }
 
+type anthropicRewriteValidationError struct {
+	err error
+}
+
+func (e *anthropicRewriteValidationError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *anthropicRewriteValidationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
 func anthropicMessageSource(index int) string {
 	return "anthropic.message." + strconv.Itoa(index)
+}
+
+func mergeAdjacentAnthropicMessages(messages []APIMessage, originalIdx []int) ([]APIMessage, []int, error) {
+	if len(messages) == 0 {
+		return nil, nil, nil
+	}
+
+	merged := make([]APIMessage, 0, len(messages))
+	mergedOriginalIdx := make([]int, 0, len(originalIdx))
+	for i, msg := range messages {
+		msgCopy := APIMessage{
+			Role:    msg.Role,
+			Content: append(json.RawMessage(nil), msg.Content...),
+		}
+		if len(merged) == 0 {
+			merged = append(merged, msgCopy)
+			if i < len(originalIdx) {
+				mergedOriginalIdx = append(mergedOriginalIdx, originalIdx[i])
+			}
+			continue
+		}
+
+		if anthropicNormalizedRole(merged[len(merged)-1].Role) != anthropicNormalizedRole(msgCopy.Role) {
+			merged = append(merged, msgCopy)
+			if i < len(originalIdx) {
+				mergedOriginalIdx = append(mergedOriginalIdx, originalIdx[i])
+			}
+			continue
+		}
+
+		content, err := mergeAnthropicMessageContent(merged[len(merged)-1].Content, msgCopy.Content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("anthropic rewrite could not merge consecutive %q messages: %w", anthropicNormalizedRole(msgCopy.Role), err)
+		}
+		merged[len(merged)-1].Content = content
+	}
+
+	return merged, mergedOriginalIdx, nil
+}
+
+func mergeAnthropicMessageContent(left, right json.RawMessage) (json.RawMessage, error) {
+	if len(left) == 0 {
+		return append(json.RawMessage(nil), right...), nil
+	}
+	if len(right) == 0 {
+		return append(json.RawMessage(nil), left...), nil
+	}
+
+	leftBlocks, err := anthropicContentToBlocks(left)
+	if err != nil {
+		return nil, err
+	}
+	rightBlocks, err := anthropicContentToBlocks(right)
+	if err != nil {
+		return nil, err
+	}
+
+	merged := make([]map[string]json.RawMessage, 0, len(leftBlocks)+len(rightBlocks))
+	merged = append(merged, leftBlocks...)
+	merged = append(merged, rightBlocks...)
+
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return nil, err
+	}
+	return finalizeAnthropicMarshaledContent(encoded), nil
+}
+
+func anthropicContentToBlocks(raw json.RawMessage) ([]map[string]json.RawMessage, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		typeRaw, err := json.Marshal("text")
+		if err != nil {
+			return nil, err
+		}
+		textRaw, err := json.Marshal(text)
+		if err != nil {
+			return nil, err
+		}
+		return []map[string]json.RawMessage{{
+			"type": typeRaw,
+			"text": textRaw,
+		}}, nil
+	}
+
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		return blocks, nil
+	}
+
+	return nil, fmt.Errorf("unsupported anthropic content encoding")
 }
 
 func anthropicRawToFilterString(raw json.RawMessage) (string, error) {
@@ -433,10 +547,10 @@ func validateAnthropicRewrittenRequest(req *MessagesRequest, originalIdx []int) 
 		if i == 0 {
 			continue
 		}
-		if req.Messages[i-1].Role == msg.Role && !adjacentInOriginal(originalIdx, i-1, i) {
+		if anthropicNormalizedRole(req.Messages[i-1].Role) == anthropicNormalizedRole(msg.Role) && !adjacentInOriginal(originalIdx, i-1, i) {
 			return fmt.Errorf(
 				"anthropic rewrite produced consecutive %q roles at messages[%d] and messages[%d]",
-				msg.Role,
+				anthropicNormalizedRole(msg.Role),
 				i-1,
 				i,
 			)
@@ -489,6 +603,17 @@ func validateAnthropicContentBlocks(raw json.RawMessage, path string) error {
 	}
 
 	return nil
+}
+
+func anthropicNormalizedRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "user", "tool", "system":
+		return "user"
+	case "assistant":
+		return "assistant"
+	default:
+		return strings.ToLower(strings.TrimSpace(role))
+	}
 }
 
 func chatMessagesEqual(a, b []ChatMessage) bool {

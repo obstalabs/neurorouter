@@ -32,6 +32,14 @@ const (
 	auditDangerousSecretRevealQuery = "dangerously_reveal_secrets"
 )
 
+func anthropicRewriteStatusCode(err error) int {
+	var validationErr *anthropicRewriteValidationError
+	if errors.As(err, &validationErr) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
 // Target describes an upstream API endpoint.
 type Target struct {
 	BaseURL string // e.g. "https://api.deepseek.com"
@@ -564,7 +572,7 @@ func (p *Proxy) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 		rewrite, err = RewriteAnthropicMessagesRequest(rawBody, originalMsgs, filteredMsgs)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "rewrite anthropic request: "+err.Error())
+			writeError(w, anthropicRewriteStatusCode(err), "rewrite anthropic request: "+err.Error())
 			return
 		}
 		pipeResult.BytesBefore = rewrite.BytesBefore
@@ -604,7 +612,7 @@ func (p *Proxy) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if rewrite == nil {
 		rewrite, err = RewriteAnthropicMessagesRequest(rawBody, originalMsgs, filteredMsgs)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "rewrite anthropic request: "+err.Error())
+			writeError(w, anthropicRewriteStatusCode(err), "rewrite anthropic request: "+err.Error())
 			return
 		}
 	}

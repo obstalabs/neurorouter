@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Anthropic rewrite now compacts filtered request JSON before forwarding, preventing small positive byte deltas after reminder cleanup on the current unreleased head
+- Anthropic rewrite now merges adjacent same-role messages introduced by filtered message removal, preserving valid role alternation instead of surfacing rewrite failures
+- Remaining Anthropic rewrite validation failures now return local `400` responses instead of `500`, so clients stop retrying malformed rewritten requests
+
 ## [0.1.29] - 2026-04-04
 
 ### Fixed

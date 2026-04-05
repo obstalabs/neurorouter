@@ -2,6 +2,7 @@ package neurorouter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -122,21 +123,22 @@ func TestRewriteAnthropicMessagesRequest_SystemReminderFilterShrinksTextBlocks(t
 	if err != nil {
 		t.Fatalf("unmarshal rewritten request: %v", err)
 	}
-
-	var firstBlocks []map[string]string
-	if err := json.Unmarshal(rewrittenReq.Messages[0].Content, &firstBlocks); err != nil {
-		t.Fatalf("decode first content blocks: %v", err)
-	}
-	if strings.Contains(firstBlocks[0]["text"], "system-reminder") {
-		t.Fatalf("expected first reminder removed, got %q", firstBlocks[0]["text"])
+	if len(rewrittenReq.Messages) != 1 {
+		t.Fatalf("messages: got %d, want 1 merged user message", len(rewrittenReq.Messages))
 	}
 
-	var secondBlocks []map[string]string
-	if err := json.Unmarshal(rewrittenReq.Messages[1].Content, &secondBlocks); err != nil {
-		t.Fatalf("decode second content blocks: %v", err)
+	var mergedBlocks []map[string]string
+	if err := json.Unmarshal(rewrittenReq.Messages[0].Content, &mergedBlocks); err != nil {
+		t.Fatalf("decode merged content blocks: %v", err)
 	}
-	if !strings.Contains(secondBlocks[0]["text"], "system-reminder") {
-		t.Fatalf("expected last reminder retained, got %q", secondBlocks[0]["text"])
+	if len(mergedBlocks) != 2 {
+		t.Fatalf("merged blocks: got %d, want 2", len(mergedBlocks))
+	}
+	if strings.Contains(mergedBlocks[0]["text"], "system-reminder") {
+		t.Fatalf("expected first reminder removed, got %q", mergedBlocks[0]["text"])
+	}
+	if !strings.Contains(mergedBlocks[1]["text"], "system-reminder") {
+		t.Fatalf("expected last reminder retained, got %q", mergedBlocks[1]["text"])
 	}
 }
 
@@ -248,13 +250,15 @@ func TestMarshalAnthropicFilteredContent_ToolFallbackStripsEmptyTextBlocks(t *te
 	}
 }
 
-func TestRewriteAnthropicMessagesRequest_RejectsBrokenRoleAlternation(t *testing.T) {
+func TestRewriteAnthropicMessagesRequest_MergesBrokenRoleAlternation(t *testing.T) {
 	body := []byte(`{
 		"model":"claude-sonnet",
 		"messages":[
 			{"role":"user","content":"first"},
 			{"role":"assistant","content":[{"type":"text","text":"assistant reply"}]},
-			{"role":"user","content":"second"}
+			{"role":"user","content":"This session is being continued from a previous conversation.\n[coalesced]\nsummary body"},
+			{"role":"assistant","content":[{"type":"text","text":"assistant follow-up"}]},
+			{"role":"user","content":"This session is being continued from a previous conversation.\n[coalesced]\nsummary body"}
 		]
 	}`)
 
@@ -270,19 +274,84 @@ func TestRewriteAnthropicMessagesRequest_RejectsBrokenRoleAlternation(t *testing
 
 	filtered := []ChatMessage{
 		original[0],
-		{
-			Role:    "assistant",
-			Content: "   \n\t",
-			Source:  original[1].Source,
-		},
-		original[2],
+		original[1],
+		original[3],
+		original[4],
+	}
+
+	rewrite, err := RewriteAnthropicMessagesRequest(body, original, filtered)
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	req, err = UnmarshalMessagesRequest(rewrite.Body)
+	if err != nil {
+		t.Fatalf("unmarshal rewritten request: %v", err)
+	}
+	if len(req.Messages) != 3 {
+		t.Fatalf("messages: got %d, want 3", len(req.Messages))
+	}
+	if req.Messages[1].Role != "assistant" {
+		t.Fatalf("merged role: got %q, want assistant", req.Messages[1].Role)
+	}
+
+	var blocks []map[string]string
+	if err := json.Unmarshal(req.Messages[1].Content, &blocks); err != nil {
+		t.Fatalf("decode merged assistant content: %v", err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("merged blocks: got %d, want 2", len(blocks))
+	}
+	if blocks[0]["text"] != "assistant reply" || blocks[1]["text"] != "assistant follow-up" {
+		t.Fatalf("merged blocks: %+v", blocks)
+	}
+}
+
+func TestAnthropicRewriteStatusCode(t *testing.T) {
+	if got := anthropicRewriteStatusCode(&anthropicRewriteValidationError{err: fmt.Errorf("bad rewrite")}); got != 400 {
+		t.Fatalf("status for validation error: got %d, want 400", got)
+	}
+	if got := anthropicRewriteStatusCode(fmt.Errorf("boom")); got != 500 {
+		t.Fatalf("status for internal error: got %d, want 500", got)
+	}
+}
+
+func TestRewriteAnthropicMessagesRequest_ReturnsValidationErrorForUnsupportedMerge(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet",
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"assistant","content":{"bad":"object"}},
+			{"role":"user","content":"remove me"},
+			{"role":"assistant","content":[{"type":"text","text":"assistant follow-up"}]}
+		]
+	}`)
+
+	req, err := UnmarshalMessagesRequest(body)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	original, err := ExtractAnthropicMessages(req)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	filtered := []ChatMessage{
+		original[0],
+		original[1],
+		original[3],
 	}
 
 	_, err = RewriteAnthropicMessagesRequest(body, original, filtered)
 	if err == nil {
-		t.Fatal("expected broken alternation error, got nil")
+		t.Fatal("expected merge validation error, got nil")
 	}
-	if !strings.Contains(err.Error(), `consecutive "user" roles`) {
+	var validationErr *anthropicRewriteValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("expected anthropicRewriteValidationError, got %T", err)
+	}
+	if !strings.Contains(err.Error(), "unsupported anthropic content encoding") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
