@@ -34,7 +34,7 @@ neurorouter --dry-run
 
 By default NeuroRouter listens on `127.0.0.1:4000`. If you really need remote clients, opt in explicitly with `neurorouter --public --listen 0.0.0.0:4000`. On public binds, `/v1/audit` and `/v1/suggestions` stay disabled unless you also pass `--expose-management`.
 
-The community edition exposes one client protocol per instance. Point it at Anthropic and it serves `/v1/messages` for Claude Code. Point it at OpenAI-compatible upstreams and it serves the current Responses-native Codex surface. If you need both Claude and Codex at once, run two instances on different ports.
+The community edition exposes one client protocol per instance. Point it at Anthropic and it serves `/v1/messages` for Claude Code, OpenClaw, and any Anthropic-compatible client. Point it at OpenAI-compatible upstreams and it serves the current Responses-native Codex surface. If you need both Claude and Codex at once, run two instances on different ports.
 
 For live Claude or Codex work in the community edition, the safe rule is one proxy instance per live session unless your client can provide a stable session selector on every request. The free binary does not include premium session-healing or cross-session recovery logic.
 
