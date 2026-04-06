@@ -93,14 +93,27 @@ Included in this free community edition:
 - Anthropic Messages passthrough for Claude Code-compatible upstreams
 - local config and CLI workflow
 
-Paid or private-only features do not live in this repository. Those include:
-- one-process multi-client hubs that serve Claude and Codex at the same time
-- session-healing and continuity repair across mixed or reused Claude/Codex sessions
-- premium task-routing and cascade logic
-- runaway detection and pre-cooldown guidance
-- context rescue and checkpoint tooling
-- session-awareness and premium spend/risk signals
-- org policy tooling, managed deployments, and hosted control-plane work
+## Free vs Pro
+
+Free cleans your requests. Pro keeps you going when things break.
+
+| | Free | Pro ($29/mo) |
+|---|---|---|
+| Filters (stale reads, thinking, retries, system reminders) | Yes | Yes |
+| Secret detection and blocking | Yes | Yes |
+| OPS metrics and audit log | Yes | Yes |
+| Protocols per instance | One | All (Claude + Codex in one daemon) |
+| Session multiplexing | No | Yes — isolated sessions, no cross-contamination |
+| Continuity repair (prevent 400s) | No | Yes — broken tool chains fixed before they hit the API |
+| Model routing (Opus → Haiku for mechanical work) | No | Yes — automatic, opt-out with one flag |
+| Runaway detection and gating | No | Yes — stops budget burn from looping agents |
+| Cooldown warning and context rescue | No | Yes — warns at 80/90/95%, auto-saves work |
+| Session healing (repair JSONL automatically) | No | Yes — orphan removal, chain repair, no manual tools |
+| Reversible secret redaction | No | Yes — secrets replaced outbound, restored inbound |
+| Prompt injection detection | No | Yes — warns on suspicious content in tool results |
+| Per-project cost attribution | No | Yes — track spend by repo/branch |
+
+[Get Pro](https://neurorouter.dev/#pricing) | Free is fully functional for single-session use under AGPL.
 
 If a proposed change adds new product capability instead of maintaining the existing community edition, it belongs in `neurorouter-pro` unless the public boundary is explicitly expanded first.
 
