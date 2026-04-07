@@ -93,8 +93,13 @@ func TestClaudeAdapter_AllFilters(t *testing.T) {
 	if chain == nil {
 		t.Fatal("expected non-nil chain")
 	}
-	if len(chain.Filters) != 6 {
-		t.Errorf("expected 6 filters for Claude, got %d", len(chain.Filters))
+	if len(chain.Filters) != 5 {
+		t.Errorf("expected 5 filters for Claude, got %d", len(chain.Filters))
+	}
+	for _, filter := range chain.Filters {
+		if filter.Name == "orphaned_results" {
+			t.Fatalf("claude filter chain should not include orphaned_results")
+		}
 	}
 }
 

@@ -61,7 +61,7 @@ type ClaudeAdapter struct{}
 func (ClaudeAdapter) Name() string { return "claude" }
 
 func (ClaudeAdapter) Filters(cfg FilterConfig) *FilterChain {
-	// All 6 filters were built for Claude — use them as-is.
+	cfg.OrphanedResults = false
 	return NewFilterChain(cfg)
 }
 
