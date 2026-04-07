@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.33] - 2026-04-07
+
+### Fixed
+- Removed `orphaned_results` from the Claude filter chain so Anthropic sessions keep tool-result turns intact instead of self-triggering tool-use concurrency `400` errors
+- Kept OpenAI/Codex orphan cleanup unchanged so Responses compatibility and compaction safety stay intact
+
 ## [0.1.32] - 2026-04-05
 
 ### Fixed
