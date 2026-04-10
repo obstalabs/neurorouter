@@ -112,6 +112,8 @@ Free cleans your requests. Pro keeps you going when things break.
 | Reversible secret redaction | No | Yes — secrets replaced outbound, restored inbound |
 | Prompt injection detection | No | Yes — warns on suspicious content in tool results |
 | Per-project cost attribution | No | Yes — track spend by repo/branch |
+| Sensitive path protection | No | Yes — redacts content, teaches model to handle safely |
+| Content access control (deny/allow lists) | No | Yes — configurable per-path content policies |
 
 [Get Pro](https://neurorouter.dev/#pricing) | Free is fully functional for single-session use under AGPL.
 
