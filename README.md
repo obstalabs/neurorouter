@@ -196,6 +196,10 @@ brew install ppiankov/tap/contextspectre
 contextspectre stats
 ```
 
+## Security
+
+Your API keys never leave your machine. NeuroRouter runs locally, uses environment variables or client passthrough auth, and never stores, transmits, or logs credentials. There is no server to breach, no database to leak, no third party to subpoena. Verify with `lsof -i -P | grep neurorouter` — the only connections are to your configured upstream.
+
 ## License
 
 [GNU Affero General Public License v3.0](LICENSE) for the community edition in this repository.
