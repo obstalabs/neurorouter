@@ -182,6 +182,20 @@ Current proxy startup keys wired through this precedence path:
 
 For current commercial offerings and pricing, see [neurorouter.dev](https://neurorouter.dev).
 
+## Works with ContextSpectre
+
+NeuroRouter and [ContextSpectre](https://github.com/ppiankov/contextspectre) are complementary — two stages of the same anti-waste pipeline.
+
+- **NeuroRouter** filters requests in real time before they hit the API — strips thinking blocks, stale reads, failed retries, snapshots, progress noise
+- **ContextSpectre** analyzes session files after requests complete — finds cross-turn tangents, measures noise ratios, repairs chain integrity, exports decisions
+
+Maximum coverage requires both. Install contextspectre alongside neurorouter:
+
+```bash
+brew install ppiankov/tap/contextspectre
+contextspectre stats
+```
+
 ## License
 
 [GNU Affero General Public License v3.0](LICENSE) for the community edition in this repository.
