@@ -105,6 +105,7 @@ Free cleans your requests. Pro keeps you going when things break.
 | Protocols per instance | One | All (Claude + Codex in one daemon) |
 | Session multiplexing | No | Yes — isolated sessions, no cross-contamination |
 | Continuity repair (prevent 400s) | No | Yes — broken tool chains fixed before they hit the API |
+| Binary content sanitization | No | Yes — strips control chars from tool results before they corrupt stored history |
 | Model routing (Opus → Haiku for mechanical work) | No | Yes — automatic, opt-out with one flag |
 | Runaway detection and gating | No | Yes — stops budget burn from looping agents |
 | Cooldown warning and context rescue | No | Yes — warns at 80/90/95%, auto-saves work |
