@@ -104,9 +104,14 @@ Free cleans your requests. Pro keeps you going when things break.
 | OPS metrics and audit log | Yes | Yes |
 | Protocols per instance | One | All (Claude + Codex in one daemon) |
 | Session multiplexing | No | Yes — isolated sessions, no cross-contamination |
-| Continuity repair (prevent 400s) | No | Yes — broken tool chains fixed before they hit the API |
+| Continuity repair (prevent 400s) | No | Yes — broken tool chains and oversized requests blocked before they hit the API |
+| Context size guard | No | Yes — rejects requests exceeding model context window before forwarding |
+| Context windowing for cascade | No | Yes — trims conversation to fit when routing to smaller-window models |
+| Circuit breaker (retry spiral prevention) | No | Yes — holds requests after 3 consecutive 400s, always-on |
+| Duplicate and burst detection | No | Yes — always-on guards prevent retry loops and accidental double-sends |
+| Upstream status alerts | No | Yes — outage, quota, and rate limit conditions surfaced immediately |
 | Binary content sanitization | No | Yes — strips control chars from tool results before they corrupt stored history |
-| Model routing (Opus → Haiku for mechanical work) | No | Yes — automatic, opt-out with one flag |
+| Model routing (Opus → Haiku, GPT-5 → mini) | No | Yes — automatic with preference list and graceful deprecation handling |
 | Runaway detection and gating | No | Yes — stops budget burn from looping agents |
 | Cooldown warning and context rescue | No | Yes — warns at 80/90/95%, auto-saves work |
 | Session healing (repair JSONL automatically) | No | Yes — orphan removal, chain repair, no manual tools |

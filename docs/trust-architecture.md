@@ -127,6 +127,19 @@ lsof -i -P | grep neurorouter
 - Does not require an account, registration, or authentication to use
 - Does not phone home, check for updates, or validate licenses at runtime
 
+## Pro-Only Structural Guards
+
+The following protections are available in [NeuroRouter Pro](https://neurorouter.dev/#pricing) and are not included in the free edition:
+
+- **Context size guard** — rejects requests exceeding the model's context window before forwarding
+- **Context windowing** — trims conversation to fit when cascade routes to a smaller-window model
+- **Circuit breaker** — holds requests after 3 consecutive upstream 400s to stop retry spirals
+- **Upstream status alerts** — surfaces outage, quota, and rate limit conditions immediately
+- **Always-on duplicate and burst detection** — prevents retry loops without configuration
+- **Cascade routing** — routes mechanical work to cheaper models automatically
+- **Continuity repair** — fixes broken tool chains before they become upstream 400s
+- **Binary content sanitization** — strips control characters from terminal output before they corrupt conversation history
+
 ## The Self-Hosted Escape Hatch
 
 Don't trust us? Run it yourself.
