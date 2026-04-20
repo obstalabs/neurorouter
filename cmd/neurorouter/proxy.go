@@ -37,7 +37,7 @@ type autoDetectResult struct {
 var proxyCmd = &cobra.Command{
 	Use:   "proxy",
 	Short: "Start the local proxy",
-	Long:  "Start the local proxy with filtering, secret protection, and compatibility handling for supported upstreams.",
+	Long:  "Start the local proxy with context hygiene, secret protection, and compatibility handling for supported upstreams.",
 	RunE:  runProxy,
 }
 
@@ -74,11 +74,11 @@ func addProxyFlags(cmd *cobra.Command) {
 	f.String("secret-report", secretReportOff, "secret diagnostics mode: off, redacted, full")
 	f.Bool("dangerously-reveal-secrets", false, "DANGER: allow storing and printing matched secret values in cleartext for local debugging")
 	f.Bool("no-protect", false, "disable secret detection")
-	f.Bool("no-filter", false, "disable content filters")
+	f.Bool("no-filter", false, "disable context hygiene filters")
 	f.Int("shell-max-output-bytes", 0, "truncate native shell outputs above this many bytes (0 disables)")
-	f.Float64("input-price-per-million-usd", neurorouter.DefaultInputPricePerMillionUSD, "estimated input token price used for savings telemetry")
+	f.Float64("input-price-per-million-usd", neurorouter.DefaultInputPricePerMillionUSD, "estimated input token price used for context-cost telemetry")
 	f.Bool("no-cache", false, "disable neurocache pattern detection")
-	f.Bool("dry-run", false, "show filtered vs original without sending upstream")
+	f.Bool("dry-run", false, "show shaped vs original without sending upstream")
 	f.Bool("debug", false, "enable debug logging")
 }
 
@@ -210,8 +210,8 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 		if label := trackRecurringFingerprint(recurringFingerprints, e.BytesBefore, e.BytesAfter, e.FiltersRun); label != "" {
 			recurring = "  fp=" + label
 		}
-		fmt.Fprintf(os.Stderr, "[req] model=%s  bytes=%d→%d (%s)%s%s\n",
-			e.Model, e.BytesBefore, e.BytesAfter, formatRequestSummary(e.BytesBefore, e.BytesAfter, inputPricePerMillionUSD), filters, secrets+recurring)
+		fmt.Fprintf(os.Stderr, "[req] model=%s  %s  %s%s%s\n",
+			e.Model, formatRequestContextLabel(e.BytesBefore, e.BytesAfter), formatRequestSummary(e.BytesBefore, e.BytesAfter, inputPricePerMillionUSD), filters, secrets+recurring)
 		if secretReport != secretReportOff && len(e.SecretDiagnostics) > 0 {
 			printSecretDiagnostics(os.Stderr, e.SecretDiagnostics, secretReport)
 		}
@@ -220,8 +220,8 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 			firstRequest = false
 			summary := neurorouter.SummarizeSavings(e.BytesBefore, e.BytesAfter, inputPricePerMillionUSD)
 			if summary.BytesSaved > 0 {
-				fmt.Fprintf(os.Stderr, "\n      NeuroRouter saved %d tokens ($%.4f) on your first request.\n", summary.TokensSaved, summary.MoneySavedUSD)
-				fmt.Fprintf(os.Stderr, "      Run 'neurorouter stats' to see cumulative savings.\n\n")
+				fmt.Fprintf(os.Stderr, "\n      NeuroRouter shaped your first request by %d tokens ($%.4f avoided).\n", summary.TokensSaved, summary.MoneySavedUSD)
+				fmt.Fprintf(os.Stderr, "      Basic context hygiene is active. Run 'neurorouter stats' to see cumulative context metrics.\n\n")
 			}
 		}
 	}
@@ -239,7 +239,7 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	if dangerousSecretReveal {
 		fmt.Fprintf(os.Stderr, "  DANGER: full matched secret values will be stored in memory for local debugging and can be revealed in cleartext\n")
 	}
-	fmt.Fprintf(os.Stderr, "  filter:  %v\n", !noFilter)
+	fmt.Fprintf(os.Stderr, "  context-hygiene: %v\n", !noFilter)
 	fmt.Fprintf(os.Stderr, "  cache:   %v\n", !noCache)
 	if len(availableAuthEnvKeys) > 0 {
 		fmt.Fprintf(os.Stderr, "  auth-env: %s\n", strings.Join(availableAuthEnvKeys, ", "))
@@ -278,8 +278,8 @@ func runProxy(cmd *cobra.Command, _ []string) error {
 	if requestCount > 0 {
 		summary := neurorouter.SummarizeSavings(totalBefore, totalAfter, inputPricePerMillionUSD)
 		fmt.Fprintf(os.Stderr, "\nSession summary (%d requests):\n", requestCount)
-		fmt.Fprintf(os.Stderr, "  Saved: %dKB / %d tokens / $%.4f (%d%% noise removed)\n",
-			summary.BytesSaved/1024, summary.TokensSaved, summary.MoneySavedUSD, summary.SavedPercent)
+		fmt.Fprintf(os.Stderr, "  Context shaped: %s -> %s (%d%% shaped, %d tokens / $%.4f avoided)\n",
+			formatKB(totalBefore), formatKB(totalAfter), summary.SavedPercent, summary.TokensSaved, summary.MoneySavedUSD)
 		if totalSecrets > 0 {
 			fmt.Fprintf(os.Stderr, "  Secrets caught: %d\n", totalSecrets)
 		}
@@ -299,11 +299,11 @@ func formatRequestDelta(before, after int) string {
 	delta := before - after
 	switch {
 	case delta > 0:
-		return fmt.Sprintf("-%d bytes, %d%% saved", delta, requestSavedPercent(before, after))
+		return fmt.Sprintf("%s shaped, %d%%", formatKB(delta), requestSavedPercent(before, after))
 	case delta < 0:
-		return fmt.Sprintf("+%d bytes", -delta)
+		return fmt.Sprintf("%s growth", formatKB(-delta))
 	default:
-		return "0 bytes"
+		return "unchanged"
 	}
 }
 

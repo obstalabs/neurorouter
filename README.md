@@ -5,7 +5,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Status: Stable](https://img.shields.io/badge/Status-Stable-green)](https://github.com/obstalabs/neurorouter/releases/latest)
 
-Cleans AI requests before they hit the model. Removes wasted context, blocks secrets, and preserves native client semantics locally.
+Context hygiene for AI coding sessions. Shapes obvious stale context, blocks secrets, and preserves native client semantics locally.
 
 > **Status: Stable.** The community edition is feature-complete and receives bug fixes, security patches, and compatibility updates only. New features ship in [NeuroRouter Pro](https://neurorouter.dev/#pricing).
 
@@ -28,7 +28,7 @@ ANTHROPIC_BASE_URL=http://localhost:4000 claude
 neurorouter proxy --target https://api.openai.com --api-key env:OPENAI_API_KEY
 codex -c 'openai_base_url="http://127.0.0.1:4000"'
 
-# See what would be filtered without sending
+# See what would be shaped without sending
 neurorouter --dry-run
 ```
 
@@ -53,17 +53,17 @@ That keeps Codex on the native Responses API path instead of relying on a generi
 
 For the community edition today, Codex is verified with an OpenAI API key. ChatGPT account-auth pass-through is detected and returned with an explicit compatibility error because the upstream rejects it without `api.responses.write`.
 
-The exact tested client/version combinations live in [docs/compatibility.md](docs/compatibility.md). If a client release changes `/models`, compression, websocket transport, or auth behavior, that matrix is the source of truth for what the community binary currently supports.
+The exact tested client/version combinations live in [docs/compatibility.md](docs/compatibility.md). If a client release changes `/models`, context shaping, websocket transport, or auth behavior, that matrix is the source of truth for what the community binary currently supports.
 
 ## What NeuroRouter is
 
-A drop-in local proxy that sits between your AI coding tool and the API. Every request passes through three stages:
+A drop-in local context hygiene layer that sits between your AI coding tool and the API. Every request passes through three stages:
 
 **Block secrets** — credentials, tokens, and connection strings are intercepted inline. Detected leaks are flagged with rotation recipes and prevention hooks.
 
-**Strip waste** — six filters remove structural noise: stale file reads, thinking blocks, orphaned tool results, failed retries, duplicate system reminders, and oversized content blocks.
+**Shape obvious stale context** — six filters remove structural noise: stale file reads, thinking blocks, orphaned tool results, failed retries, duplicate system reminders, and oversized content blocks.
 
-Universal filters such as `oversized_blocks` and `stale_reads` apply across providers. Provider-specific cleanup such as thinking removal, duplicate system handling, and orphaned tool-result repair is selected by adapter in the live proxy path.
+Universal context hygiene filters such as `oversized_blocks` and `stale_reads` apply across providers. Provider-specific cleanup such as thinking removal, duplicate system handling, and orphaned tool-result repair is selected by adapter in the live proxy path.
 
 **Preserve semantics** — Codex/OpenAI clients can stay on the native Responses wire path when the selected upstream supports it. For simpler text-only requests against Chat Completions targets, NeuroRouter can still fall back to compatibility translation.
 
@@ -85,7 +85,7 @@ If code is published in this repository under the AGPL, recipients of that code 
 
 Included in this free community edition:
 - local proxy core
-- request filtering and secret protection
+- basic context hygiene filters and secret protection
 - audit log and dry-run inspection
 - DND suppression controls
 - provider adapters and compatibility routing
@@ -95,16 +95,16 @@ Included in this free community edition:
 
 ## Free vs Pro
 
-Free cleans your requests. Pro keeps you going when things break.
+Free keeps single-session request context clean. Pro preserves reasoning continuity when sessions get long, concurrent, or fragile.
 
 | | Free | Pro ($29/mo) |
 |---|---|---|
-| Filters (stale reads, thinking, retries, system reminders) | Yes | Yes |
+| Basic context hygiene filters (stale reads, thinking, retries, system reminders) | Yes | Yes |
 | Secret detection and blocking | Yes | Yes |
 | OPS metrics and audit log | Yes | Yes |
 | Protocols per instance | One | All (Claude + Codex in one daemon) |
 | Session multiplexing | No | Yes — isolated sessions, no cross-contamination |
-| Continuity repair (prevent 400s) | No | Yes — broken tool chains and oversized requests blocked before they hit the API |
+| Advanced continuity repair (prevent 400s) | No | Yes — broken tool chains and oversized requests blocked before they hit the API |
 | Context size guard | No | Yes — rejects requests exceeding model context window before forwarding |
 | Context windowing for cascade | No | Yes — trims conversation to fit when routing to smaller-window models |
 | Circuit breaker (retry spiral prevention) | No | Yes — holds requests after 3 consecutive 400s, always-on |
@@ -120,6 +120,7 @@ Free cleans your requests. Pro keeps you going when things break.
 | Per-project cost attribution | No | Yes — track spend by repo/branch |
 | Sensitive path protection | No | Yes — redacts content, teaches model to handle safely |
 | Content access control (deny/allow lists) | No | Yes — configurable per-path content policies |
+| Vector State / RCS / constraint tracking | No | Yes — Pro roadmap for preserving the semantically correct vector to the result |
 
 [Get Pro](https://neurorouter.dev/#pricing) | Free is fully functional for single-session use under AGPL.
 
@@ -137,7 +138,7 @@ If a proposed change adds new product capability instead of maintaining the exis
 
 *Principiis obsta* — resist the beginnings.
 
-Remove waste before it's billed. Block secrets before they leave. Preserve client semantics and local trust boundaries before the model sees the request. Deterministic rules, not ML predictions. Local execution, not cloud dependencies. Your API key passes through untouched — we never parse it.
+Shape obvious stale context before it reaches the model. Block secrets before they leave. Preserve client semantics and local trust boundaries before the model sees the request. Deterministic rules, not ML predictions. Local execution, not cloud dependencies. Your API key passes through untouched — we never parse it.
 
 ## Trust
 
@@ -146,7 +147,7 @@ Remove waste before it's billed. Block secrets before they leave. Preserve clien
 - **No key inspection** — Authorization header forwarded as-is, never parsed, never stored
 - **No phone-home** — zero telemetry, zero outbound calls except to your configured upstream
 - **Deterministic** — every transformation is visible, explainable, reproducible
-- **Verifiable** — `--dry-run` shows exactly what would be removed before sending
+- **Verifiable** — `--dry-run` shows exactly what would be shaped before sending
 
 ## Commands
 
@@ -190,9 +191,9 @@ For current commercial offerings and pricing, see [neurorouter.dev](https://neur
 
 ## Works with ContextSpectre
 
-NeuroRouter and [ContextSpectre](https://github.com/ppiankov/contextspectre) are complementary — two stages of the same anti-waste pipeline.
+NeuroRouter and [ContextSpectre](https://github.com/ppiankov/contextspectre) are complementary — two stages of the same context hygiene pipeline.
 
-- **NeuroRouter** filters requests in real time before they hit the API — strips thinking blocks, stale reads, failed retries, snapshots, progress noise
+- **NeuroRouter** shapes requests in real time before they hit the API — strips thinking blocks, stale reads, failed retries, snapshots, progress noise
 - **ContextSpectre** analyzes session files after requests complete — finds cross-turn tangents, measures noise ratios, repairs chain integrity, exports decisions
 
 Maximum coverage requires both. Install contextspectre alongside neurorouter:

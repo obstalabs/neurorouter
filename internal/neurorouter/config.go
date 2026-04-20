@@ -40,7 +40,7 @@ var ConfigKeys = []ConfigKey{
 	{"verbosity", "string", "default", "alert verbosity level", []string{"silent", "minimal", "default", "verbose"}},
 	{"context_limit", "int", "200000", "context window size in tokens", nil},
 	{"protect_policy", "string", "warn", "secret detection policy", []string{"block", "redact", "warn"}},
-	{"input_price_per_million_usd", "float", "3.0", "estimated input token price used for savings telemetry", nil},
+	{"input_price_per_million_usd", "float", "3.0", "estimated input token price used for context-cost telemetry", nil},
 	{"dnd_persistent", "bool", "false", "persist DND state across restarts", nil},
 	{"state_db_path", "string", "~/.neurorouter/state.db", "SQLite state database path", nil},
 	{"state_retention_days", "int", "90", "days to retain state data", nil},

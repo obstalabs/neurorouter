@@ -130,8 +130,8 @@ func (r ProgressReport) FormatHuman() string {
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, "  OPS:     %.0f%% signal (%.0f%% noise removed)\n", r.OPS, 100-r.OPS)
-	fmt.Fprintf(&b, "  Saved:   %dKB / %d tokens / $%.4f\n", r.BytesSaved/1024, r.TokensSaved, r.MoneySaved)
+	fmt.Fprintf(&b, "  OPS:     %.0f%% signal (%.0f%% shaped)\n", r.OPS, 100-r.OPS)
+	fmt.Fprintf(&b, "  Context: %dKB / %d tokens / $%.4f avoided\n", r.BytesSaved/1024, r.TokensSaved, r.MoneySaved)
 
 	if r.SecretsCaught > 0 {
 		fmt.Fprintf(&b, "  Secrets: %d caught\n", r.SecretsCaught)
@@ -142,7 +142,7 @@ func (r ProgressReport) FormatHuman() string {
 	}
 
 	if r.WorstPattern != "" {
-		fmt.Fprintf(&b, "  Fix:     %s is your biggest remaining waste\n", r.WorstPattern)
+		fmt.Fprintf(&b, "  Fix:     %s is your biggest remaining context hygiene issue\n", r.WorstPattern)
 	}
 
 	return b.String()

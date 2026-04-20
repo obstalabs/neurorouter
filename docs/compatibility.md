@@ -4,6 +4,8 @@ This document tracks the client and version combinations that are verified in th
 
 The rule is simple: if a path is marked supported here, there is both repository evidence and at least one concrete validation reference behind the claim. If it is not listed as supported, do not assume it works in the community binary.
 
+The community edition provides basic context hygiene on verified client paths. Pro-only reasoning-continuity features such as Vector State, RCS, and session lifecycle management are intentionally out of scope here.
+
 ## Version Matrix
 
 | Client | Version | Auth Mode | Proxy Setup | Transport Expectations | Outcome | Verified | Evidence |

@@ -73,7 +73,7 @@ func NewAlertInjector(verbosity Verbosity, dnd *DND) *AlertInjector {
 	return NewAlertInjectorWithPricing(verbosity, dnd, DefaultInputPricePerMillionUSD)
 }
 
-// NewAlertInjectorWithPricing creates an injector with configurable savings pricing.
+// NewAlertInjectorWithPricing creates an injector with configurable context-cost pricing.
 func NewAlertInjectorWithPricing(verbosity Verbosity, dnd *DND, inputPricePerMillionUSD float64) *AlertInjector {
 	return &AlertInjector{
 		verbosity:               verbosity,
@@ -113,10 +113,10 @@ func (ai *AlertInjector) Generate(result *PipelineResult, suggestions []Suggesti
 		alerts = append(alerts, Alert{Tier: TierCritical, Message: msg})
 	}
 
-	// Important: significant waste removed (>1KB saved).
+	// Important: significant context waste removed (>1KB shaped).
 	summary := SummarizeSavings(result.BytesBefore, result.BytesAfter, ai.inputPricePerMillionUSD)
 	if summary.BytesSaved > 1024 && len(result.FiltersRun) > 0 {
-		msg := fmt.Sprintf("Removed %dK tokens (~$%.2f saved)", summary.TokensSaved/1000, summary.MoneySavedUSD)
+		msg := fmt.Sprintf("Shaped %dK tokens of context waste (~$%.2f avoided)", summary.TokensSaved/1000, summary.MoneySavedUSD)
 		alerts = append(alerts, Alert{Tier: TierImportant, Message: msg})
 	}
 

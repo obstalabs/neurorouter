@@ -21,11 +21,11 @@ func TestPrependAlertsToResponsesAPIResponse(t *testing.T) {
 
 	prependAlertsToResponsesAPIResponse(resp, []Alert{{
 		Tier:    TierImportant,
-		Message: "Removed 2K tokens (~$0.01 saved)",
+		Message: "Shaped 2K tokens of context waste (~$0.01 avoided)",
 	}})
 
 	text := resp.Output[0].Content[0].Text
-	if !strings.HasPrefix(text, "[NEUROROUTER] Removed 2K tokens") {
+	if !strings.HasPrefix(text, "[NEUROROUTER] Shaped 2K tokens") {
 		t.Fatalf("expected alert prefix, got %q", text)
 	}
 	if !strings.Contains(text, "native ok") {
@@ -60,7 +60,7 @@ func TestInjectAlertsIntoResponsesBody_AddsOutputWhenMissing(t *testing.T) {
 func TestRewriteResponsesEventPayload_PrependsAlertsOnce(t *testing.T) {
 	state := newResponsesAlertStreamState([]Alert{{
 		Tier:    TierImportant,
-		Message: "Removed 2K tokens (~$0.01 saved)",
+		Message: "Shaped 2K tokens of context waste (~$0.01 avoided)",
 	}})
 
 	delta, err := rewriteResponsesEventPayload(
@@ -71,7 +71,7 @@ func TestRewriteResponsesEventPayload_PrependsAlertsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewrite delta: %v", err)
 	}
-	if !strings.Contains(string(delta), "[NEUROROUTER] Removed 2K tokens") {
+	if !strings.Contains(string(delta), "[NEUROROUTER] Shaped 2K tokens") {
 		t.Fatalf("expected alert in first delta: %s", string(delta))
 	}
 
@@ -95,7 +95,7 @@ func TestRewriteResponsesEventPayload_PrependsAlertsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewrite completed: %v", err)
 	}
-	if !strings.Contains(string(completed), "[NEUROROUTER] Removed 2K tokens") {
+	if !strings.Contains(string(completed), "[NEUROROUTER] Shaped 2K tokens") {
 		t.Fatalf("expected alert in completed payload: %s", string(completed))
 	}
 }

@@ -5,7 +5,7 @@
 `neurorouter` with no arguments starts the proxy with defaults. This is the 30-second path:
 
 ```bash
-neurorouter                    # starts proxy on 127.0.0.1:4000, all filters enabled
+neurorouter                    # starts proxy on 127.0.0.1:4000, context hygiene enabled
 neurorouter proxy              # explicit, same as above
 neurorouter --help             # shows help
 ```
@@ -15,7 +15,7 @@ neurorouter --help             # shows help
 ```
 neurorouter                    # start proxy (default command)
 neurorouter proxy              # start proxy (explicit)
-neurorouter stats              # show session stats (OPS, savings, suggestions)
+neurorouter stats              # show session stats (OPS, context metrics, suggestions)
 neurorouter explain <pattern>  # explain what a detected pattern means
 neurorouter dnd                # toggle do-not-disturb (suppress suggestions)
 neurorouter audit              # show transformation audit log
@@ -37,9 +37,9 @@ Start the local proxy.
 | `--api-key` | `""` | API key (or `env:VAR_NAME`) |
 | `--protect-policy` | `warn` | secret policy: `block`, `redact`, `warn` |
 | `--no-protect` | `false` | disable secret detection |
-| `--no-filter` | `false` | disable content filters |
+| `--no-filter` | `false` | disable context hygiene filters |
 | `--no-cache` | `false` | disable neurocache |
-| `--dry-run` | `false` | show filtered vs original, don't forward |
+| `--dry-run` | `false` | show shaped vs original, don't forward |
 | `--debug` | `false` | enable debug logging |
 
 **Output (human, default):**
@@ -48,12 +48,12 @@ Start the local proxy.
 neurorouter listening on 127.0.0.1:4000
   target:  https://api.openai.com
   protect: true (policy: warn)
-  filter:  true
+  context-hygiene: true
   cache:   true
   public:  false (loopback only)
 
-[req] model=gpt-4o  bytes=12400→8200 (34% saved)  filters=[thinking,system_reminders]  secrets=0
-[req] model=gpt-4o  bytes=9800→9800 (0% saved)  secrets=0
+[req] model=gpt-4o  context=8.0KB (shaped from 12.1KB)  4.1KB shaped, 33%; 1050 tokens; $0.0032 avoided  filters=[thinking,system_reminders]  secrets=0
+[req] model=gpt-4o  context=9.6KB  unchanged  secrets=0
 ```
 
 **Planned machine output (future `--json` mode):**
@@ -76,18 +76,18 @@ Show session statistics. Queries the running proxy's `/v1/suggestions` and `/v1/
 
 ```
 Session stats (23 requests)
-  Bytes: 285KB → 194KB (32% saved, ~$0.07 saved)
-  Top filter: system_reminders (12 activations)
+  Context: 285.0KB -> 194.0KB (32% shaped, ~$0.0700 avoided)
+  Top context hygiene filter: system_reminders (12 activations)
   Secrets caught: 2 (policy: warn)
   Suggestions: 3
 
 Suggestions:
   [high]   stale_reads: /src/proxy.go read 8 times
            → cache or consolidate repeated reads in the client workflow
-  [medium] thinking_bloat: 22% of token spend
-           → keep NeuroRouter filters enabled and compact earlier
+  [medium] thinking_bloat: 22% of context is thinking blocks
+           → keep NeuroRouter context hygiene enabled and compact earlier
   [low]    reminder_spam: 3x duplicated
-           → keep NeuroRouter filters enabled (default behavior)
+           → keep NeuroRouter context hygiene enabled (default behavior)
 ```
 
 ### `neurorouter explain <pattern>`
@@ -103,13 +103,13 @@ neurorouter explain stale_reads
 ```
 stale_reads — repeated file reads without intervening writes
 
-Your session reads the same file multiple times. Each read consumes tokens
-but provides no new information after the first read.
+Your session reads the same file multiple times. Each repeated read pushes
+old context back into the model without adding new state.
 
 Fix: install a read-cache hook that caches file contents within a session.
   → review repeated reads with neurorouter audit and your client hooks
 
-Estimated savings: 4KB per duplicate read (~$0.003 per read at Sonnet pricing)
+Context impact: ~4KB less repeated context per duplicate read (~$0.003 avoided at Sonnet pricing)
 ```
 
 ### `neurorouter dnd`

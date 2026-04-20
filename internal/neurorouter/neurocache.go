@@ -36,7 +36,7 @@ type Suggestion struct {
 	CostUSD              float64            `json:"cost_usd"`              // estimated dollar cost at $3/M input tokens
 	Action               string             `json:"action"`                // what to do: "install read-cache hook"
 	InstallAction        string             `json:"install_action"`        // concrete install path or command
-	ProjectedImprovement string             `json:"projected_improvement"` // "OPS 45% → 72%, ~$12/session saved"
+	ProjectedImprovement string             `json:"projected_improvement"` // e.g. "less repeated context, ~$12/session avoided"
 }
 
 // NeurocacheConfig controls the neurocache.
@@ -173,7 +173,7 @@ func (nc *Neurocache) Suggestions() []Suggestion {
 				CostUSD:              cost,
 				Action:               "install read-cache hook to avoid redundant file reads",
 				InstallAction:        "review repeated reads with neurorouter audit or stats and cache file contents in the client workflow",
-				ProjectedImprovement: fmt.Sprintf("%d fewer reads, ~$%.2f/session saved", count-1, cost),
+				ProjectedImprovement: fmt.Sprintf("%d fewer repeated reads, ~$%.2f/session avoided", count-1, cost),
 			})
 		}
 	}
@@ -196,8 +196,8 @@ func (nc *Neurocache) Suggestions() []Suggestion {
 			TokensWasted:         tokens,
 			CostUSD:              cost,
 			Action:               "enable system_reminders filter to deduplicate automatically",
-			InstallAction:        "keep NeuroRouter filters enabled (default) so reminder cleanup stays active",
-			ProjectedImprovement: fmt.Sprintf("%dKB saved per session, ~$%.2f", wasteBytes/1024, cost),
+			InstallAction:        "keep NeuroRouter context hygiene filters enabled (default) so reminder cleanup stays active",
+			ProjectedImprovement: fmt.Sprintf("%dKB less repeated context per session, ~$%.2f avoided", wasteBytes/1024, cost),
 		})
 	}
 
@@ -216,12 +216,12 @@ func (nc *Neurocache) Suggestions() []Suggestion {
 				Type:                 "context_bloat",
 				Category:             CategorySkill,
 				Severity:             severity,
-				Metric:               fmt.Sprintf("%.0f%% of context is noise (%dKB wasted across %d requests)", wasteRatio*100, wasteBytes/1024, nc.requestCount),
+				Metric:               fmt.Sprintf("%.0f%% of context is obvious noise (%dKB shaped across %d requests)", wasteRatio*100, wasteBytes/1024, nc.requestCount),
 				TokensWasted:         tokens,
 				CostUSD:              cost,
 				Action:               "trigger /compact at 35K token threshold",
-				InstallAction:        "compact earlier in the client session and keep NeuroRouter filters enabled",
-				ProjectedImprovement: fmt.Sprintf("%.0f%% noise reduction, ~$%.2f/session saved", wasteRatio*100, cost),
+				InstallAction:        "compact earlier in the client session and keep NeuroRouter context hygiene filters enabled",
+				ProjectedImprovement: fmt.Sprintf("%.0f%% cleaner context, ~$%.2f/session avoided", wasteRatio*100, cost),
 			})
 		}
 	}
@@ -257,12 +257,12 @@ func (nc *Neurocache) Suggestions() []Suggestion {
 				Type:                 "thinking_bloat",
 				Category:             CategoryFilter,
 				Severity:             severity,
-				Metric:               fmt.Sprintf("%.0f%% of token spend is thinking blocks (%dKB)", thinkRatio*100, nc.thinkingBytes/1024),
+				Metric:               fmt.Sprintf("%.0f%% of context is thinking blocks (%dKB)", thinkRatio*100, nc.thinkingBytes/1024),
 				TokensWasted:         tokens,
 				CostUSD:              cost,
 				Action:               "enable thinking filter to strip thinking blocks",
-				InstallAction:        "keep NeuroRouter filters enabled (default) so thinking cleanup stays active",
-				ProjectedImprovement: fmt.Sprintf("%.0f%% cost reduction on thinking-heavy sessions", thinkRatio*100),
+				InstallAction:        "keep NeuroRouter context hygiene filters enabled (default) so thinking cleanup stays active",
+				ProjectedImprovement: fmt.Sprintf("%.0f%% cleaner context on thinking-heavy sessions", thinkRatio*100),
 			})
 		}
 	}
@@ -284,7 +284,7 @@ func (nc *Neurocache) Suggestions() []Suggestion {
 			CostUSD:              cost,
 			Action:               "set max tool output size policy to truncate large results",
 			InstallAction:        "trim file reads, command output, or diffs in the client workflow before they reach the model",
-			ProjectedImprovement: fmt.Sprintf("%dKB saved, ~$%.2f/session", nc.largeOutputBytes/1024, cost),
+			ProjectedImprovement: fmt.Sprintf("%dKB less oversized context, ~$%.2f/session avoided", nc.largeOutputBytes/1024, cost),
 		})
 	}
 

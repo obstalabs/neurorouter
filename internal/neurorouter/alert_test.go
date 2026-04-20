@@ -43,7 +43,7 @@ func TestAlertInjector_ImportantOnSignificantWaste(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("expected important alert for >1KB saved")
+		t.Error("expected important alert for >1KB shaped")
 	}
 }
 
@@ -60,8 +60,8 @@ func TestAlertInjector_UsesConfiguredPricing(t *testing.T) {
 		if alert.Tier != TierImportant {
 			continue
 		}
-		if !strings.Contains(alert.Message, "~$0.01 saved") {
-			t.Fatalf("important alert: got %q, want configured savings", alert.Message)
+		if !strings.Contains(alert.Message, "~$0.01 avoided") {
+			t.Fatalf("important alert: got %q, want configured context-cost estimate", alert.Message)
 		}
 		return
 	}
@@ -79,7 +79,7 @@ func TestAlertInjector_NoAlertForSmallSavings(t *testing.T) {
 
 	for _, a := range alerts {
 		if a.Tier == TierImportant {
-			t.Error("should not emit important alert for <1KB savings")
+			t.Error("should not emit important alert for <1KB shaped")
 		}
 	}
 }
@@ -209,7 +209,7 @@ func TestAlertInjector_Throttling(t *testing.T) {
 func TestFormatAlerts(t *testing.T) {
 	alerts := []Alert{
 		{Tier: TierCritical, Message: "AWS key redacted"},
-		{Tier: TierImportant, Message: "Removed 5K tokens"},
+		{Tier: TierImportant, Message: "Shaped 5K tokens"},
 	}
 
 	formatted := FormatAlerts(alerts)
@@ -217,7 +217,7 @@ func TestFormatAlerts(t *testing.T) {
 	if !strings.Contains(formatted, "[NEUROROUTER] AWS key redacted") {
 		t.Error("expected NEUROROUTER prefix")
 	}
-	if !strings.Contains(formatted, "[NEUROROUTER] Removed 5K tokens") {
+	if !strings.Contains(formatted, "[NEUROROUTER] Shaped 5K tokens") {
 		t.Error("expected second alert")
 	}
 	if !strings.HasSuffix(formatted, "\n\n") {

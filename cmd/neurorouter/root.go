@@ -6,13 +6,13 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "neurorouter",
-	Short: "LLM proxy that filters noise and catches secrets before they leave your machine",
-	Long: `NeuroRouter is a local LLM proxy that makes your requests better before they leave your machine.
+	Short: "Context hygiene layer for local AI coding sessions",
+	Long: `NeuroRouter is a local context hygiene layer that shapes AI requests before they leave your machine.
 
   protect: catch leaked secrets before they reach the API
-  purify:  strip noise, duplicates, and waste from prompts
-  route:   send requests to the right model
-  observe: detect patterns and suggest improvements
+  shape:   remove obvious stale context, retries, reminders, and oversized blocks
+  preserve: keep supported client protocol semantics intact
+  observe: show local audit evidence for what changed
 
 Start the proxy:
   neurorouter proxy

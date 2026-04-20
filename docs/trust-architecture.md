@@ -54,11 +54,11 @@ lsof -i -P | grep neurorouter
 
 ### 4. Deterministic transformation
 
-Every filter and protection rule is deterministic. No ML, no confidence scores, no probabilistic decisions.
+Every context hygiene filter and protection rule is deterministic. No ML, no confidence scores, no probabilistic decisions.
 
 - Filters use exact pattern matching (regex on serialized JSON patterns)
 - Secret detection uses structural patterns (prefix-based, not heuristic)
-- Every transformation is logged: what was removed, which filter, how many bytes
+- Every transformation is logged: what was shaped, which filter, how many bytes
 
 The management state that backs `/v1/audit`, `/v1/suggestions`, and `/v1/dnd` is session-scoped. For concurrent clients on one proxy, send `X-Neurorouter-Session` on request traffic and query the same session with `?session=<id>` or the matching CLI flag. Without an explicit selector, the proxy uses the default local session bucket.
 
@@ -84,7 +84,7 @@ The `/v1/audit` endpoint shows the transformation record for the selected sessio
 
 Users can verify every claim without trusting documentation:
 
-**Dry-run mode** — see exactly what would be filtered without sending anything upstream:
+**Dry-run mode** — see exactly what would be shaped without sending anything upstream:
 
 ```bash
 neurorouter --dry-run --target https://api.openai.com

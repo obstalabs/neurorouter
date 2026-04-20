@@ -1343,7 +1343,7 @@ func TestHandleResponses_NativeResponsesNormalizesReplayedOutputTextHistory(t *t
 			"type": "message",
 			"role": "user",
 			"content": []map[string]any{
-				{"type": "output_text", "text": "[NEUROROUTER] Removed 413K tokens (~$1.24 saved)\n\nnative ok"},
+				{"type": "output_text", "text": "[NEUROROUTER] Shaped 413K tokens of context waste (~$1.24 avoided)\n\nnative ok"},
 			},
 		}},
 	}
@@ -1369,7 +1369,7 @@ func TestHandleResponses_NativeResponsesNormalizesReplayedOutputTextHistory(t *t
 	if part["type"] != "input_text" {
 		t.Fatalf("text part type: got %v, want input_text", part["type"])
 	}
-	if !strings.HasPrefix(part["text"].(string), "[NEUROROUTER] Removed 413K tokens") {
+	if !strings.HasPrefix(part["text"].(string), "[NEUROROUTER] Shaped 413K tokens") {
 		t.Fatalf("text part text: got %q", part["text"])
 	}
 }
@@ -1583,7 +1583,7 @@ func TestHandleResponses_NativeResponsesNonStreamingInjectsAlerts(t *testing.T) 
 	first := output[0].(map[string]any)
 	content := first["content"].([]any)
 	text := content[0].(map[string]any)["text"].(string)
-	if !strings.HasPrefix(text, "[NEUROROUTER] Removed") {
+	if !strings.HasPrefix(text, "[NEUROROUTER] Shaped") {
 		t.Fatalf("expected in-band alert prefix, got %q", text)
 	}
 	if !strings.Contains(text, "native ok") {
@@ -1661,7 +1661,7 @@ func TestHandleResponses_NativeResponsesStreamingInjectsAlerts(t *testing.T) {
 		t.Fatalf("read body: %v", err)
 	}
 	events := string(data)
-	if !strings.Contains(events, "[NEUROROUTER] Removed") {
+	if !strings.Contains(events, "[NEUROROUTER] Shaped") {
 		t.Fatalf("expected in-band alert in stream, got %s", events)
 	}
 	if !strings.Contains(events, "\"text\":\"[NEUROROUTER]") {
@@ -1859,10 +1859,10 @@ func TestHandleResponsesWebsocket_NativeResponsesInjectsAlerts(t *testing.T) {
 		events = append(events, string(message))
 	}
 
-	if !strings.Contains(events[1], "[NEUROROUTER] Removed") {
+	if !strings.Contains(events[1], "[NEUROROUTER] Shaped") {
 		t.Fatalf("expected alert in delta websocket event: %s", events[1])
 	}
-	if !strings.Contains(events[2], "[NEUROROUTER] Removed") {
+	if !strings.Contains(events[2], "[NEUROROUTER] Shaped") {
 		t.Fatalf("expected alert in completed websocket event: %s", events[2])
 	}
 }

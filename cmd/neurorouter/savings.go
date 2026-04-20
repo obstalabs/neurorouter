@@ -18,13 +18,27 @@ func resolveInputPricePerMillionUSD(cmd *cobra.Command, cfg *neurorouter.Config)
 	return neurorouter.NormalizeInputPricePerMillionUSD(price)
 }
 
+func formatKB(bytes int) string {
+	if bytes < 0 {
+		bytes = 0
+	}
+	return fmt.Sprintf("%.1fKB", float64(bytes)/1024)
+}
+
+func formatRequestContextLabel(before, after int) string {
+	if before > 0 && before != after {
+		return fmt.Sprintf("context=%s (shaped from %s)", formatKB(after), formatKB(before))
+	}
+	return fmt.Sprintf("context=%s", formatKB(after))
+}
+
 func formatRequestSummary(before, after int, inputPricePerMillionUSD float64) string {
 	summary := neurorouter.SummarizeSavings(before, after, inputPricePerMillionUSD)
 	delta := formatRequestDelta(before, after)
 	if summary.BytesSaved <= 0 {
 		return delta
 	}
-	return fmt.Sprintf("%s; %d tokens; $%.4f", delta, summary.TokensSaved, summary.MoneySavedUSD)
+	return fmt.Sprintf("%s; %d tokens; $%.4f avoided", delta, summary.TokensSaved, summary.MoneySavedUSD)
 }
 
 func trackRecurringFingerprint(counts map[string]int, before, after int, filters []string) string {

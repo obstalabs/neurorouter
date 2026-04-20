@@ -103,8 +103,8 @@ func TestProgressTracker_FormatHuman(t *testing.T) {
 	if !strings.Contains(human, "OPS:") {
 		t.Error("expected OPS in output")
 	}
-	if !strings.Contains(human, "Saved:") {
-		t.Error("expected Saved in output")
+	if !strings.Contains(human, "Context:") {
+		t.Error("expected Context in output")
 	}
 	if !strings.Contains(human, "Secrets:") {
 		t.Error("expected Secrets in output")

@@ -20,7 +20,7 @@ func init() {
 	statsCmd.Flags().String("addr", "localhost:4000", "proxy address to query")
 	statsCmd.Flags().Bool("json", false, "output as JSON")
 	statsCmd.Flags().String("session", "", "session identifier to inspect")
-	statsCmd.Flags().Float64("input-price-per-million-usd", neurorouter.DefaultInputPricePerMillionUSD, "estimated input token price used for savings telemetry")
+	statsCmd.Flags().Float64("input-price-per-million-usd", neurorouter.DefaultInputPricePerMillionUSD, "estimated input token price used for context-cost telemetry")
 }
 
 func runStats(cmd *cobra.Command, _ []string) error {
@@ -105,8 +105,8 @@ func runStats(cmd *cobra.Command, _ []string) error {
 	}
 
 	summary := neurorouter.SummarizeSavings(totalBefore, totalAfter, inputPricePerMillionUSD)
-	if _, err := fmt.Fprintf(out, "  Bytes: %dKB → %dKB (%d%% saved, ~$%.4f saved)\n",
-		totalBefore/1024, totalAfter/1024, summary.SavedPercent, summary.MoneySavedUSD); err != nil {
+	if _, err := fmt.Fprintf(out, "  Context: %s -> %s (%d%% shaped, ~$%.4f avoided)\n",
+		formatKB(totalBefore), formatKB(totalAfter), summary.SavedPercent, summary.MoneySavedUSD); err != nil {
 		return err
 	}
 
@@ -120,7 +120,7 @@ func runStats(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	if topFilter != "" {
-		if _, err := fmt.Fprintf(out, "  Top filter: %s (%d activations)\n", topFilter, topHits); err != nil {
+		if _, err := fmt.Fprintf(out, "  Top context hygiene filter: %s (%d activations)\n", topFilter, topHits); err != nil {
 			return err
 		}
 	}

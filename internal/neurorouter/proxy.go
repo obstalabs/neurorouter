@@ -132,7 +132,7 @@ type ProxyConfig struct {
 	Filters                 FilterConfig            // content filter configuration
 	Protection              ProtectConfig           // secret detection configuration
 	Neurocache              NeurocacheConfig        // neurocache configuration
-	InputPricePerMillionUSD float64                 // estimated input token price for savings telemetry
+	InputPricePerMillionUSD float64                 // estimated input token price for context-cost telemetry
 	DryRun                  bool                    // if true, show filtered vs original without sending
 	OnRequest               func(RequestEvent)      // callback for per-request logging (nil = no logging)
 }

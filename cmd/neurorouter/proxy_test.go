@@ -308,7 +308,7 @@ func TestStartupAuthMode(t *testing.T) {
 func TestFormatRequestDelta(t *testing.T) {
 	t.Run("shows small positive savings even when percent rounds to zero", func(t *testing.T) {
 		got := formatRequestDelta(71042, 70952)
-		want := "-90 bytes, 0% saved"
+		want := "0.1KB shaped, 0%"
 		if got != want {
 			t.Fatalf("format delta: got %q, want %q", got, want)
 		}
@@ -316,7 +316,7 @@ func TestFormatRequestDelta(t *testing.T) {
 
 	t.Run("shows zero delta cleanly", func(t *testing.T) {
 		got := formatRequestDelta(41806, 41806)
-		want := "0 bytes"
+		want := "unchanged"
 		if got != want {
 			t.Fatalf("format delta: got %q, want %q", got, want)
 		}
@@ -324,7 +324,7 @@ func TestFormatRequestDelta(t *testing.T) {
 
 	t.Run("shows slight growth cleanly", func(t *testing.T) {
 		got := formatRequestDelta(41653, 41655)
-		want := "+2 bytes"
+		want := "0.0KB growth"
 		if got != want {
 			t.Fatalf("format delta: got %q, want %q", got, want)
 		}
@@ -334,7 +334,7 @@ func TestFormatRequestDelta(t *testing.T) {
 func TestFormatRequestSummary(t *testing.T) {
 	t.Run("adds tokens and usd for savings", func(t *testing.T) {
 		got := formatRequestSummary(72628, 64030, 3.0)
-		want := "-8598 bytes, 11% saved; 2149 tokens; $0.0064"
+		want := "8.4KB shaped, 11%; 2149 tokens; $0.0064 avoided"
 		if got != want {
 			t.Fatalf("format summary: got %q, want %q", got, want)
 		}
@@ -342,9 +342,27 @@ func TestFormatRequestSummary(t *testing.T) {
 
 	t.Run("keeps growth concise", func(t *testing.T) {
 		got := formatRequestSummary(41653, 41655, 3.0)
-		want := "+2 bytes"
+		want := "0.0KB growth"
 		if got != want {
 			t.Fatalf("format summary: got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestFormatRequestContextLabel(t *testing.T) {
+	t.Run("shows shaped context", func(t *testing.T) {
+		got := formatRequestContextLabel(72628, 64030)
+		want := "context=62.5KB (shaped from 70.9KB)"
+		if got != want {
+			t.Fatalf("format context label: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("shows unchanged context", func(t *testing.T) {
+		got := formatRequestContextLabel(41806, 41806)
+		want := "context=40.8KB"
+		if got != want {
+			t.Fatalf("format context label: got %q, want %q", got, want)
 		}
 	})
 }
