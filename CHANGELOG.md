@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.34] - 2026-04-20
+
 ### Changed
 - Reframed community-edition docs and CLI messaging around basic context hygiene instead of raw token savings, while keeping the free/pro capability boundary unchanged
 
