@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package neurorouter
 
 // RotationRecipe describes how to rotate a specific credential type.
