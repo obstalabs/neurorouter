@@ -8,7 +8,7 @@ on:
 
 permissions:
   actions: write
-  contents: read
+  contents: write
   pull-requests: write
   statuses: write
 
@@ -25,4 +25,3 @@ jobs:
           path-to-document: "https://github.com/${{ github.repository }}/blob/main/docs/CLA.md"
           branch: main
           allowlist: obstalabs,dependabot[bot]
-          remote-organization-name: obstalabs
