@@ -81,9 +81,9 @@ It is also the maintenance-focused community edition. By default, this repo acce
 
 If code is published in this repository under the AGPL, recipients of that code receive AGPL rights to that code.
 
-## Community Vs Premium
+## What you get
 
-Included in this free community edition:
+This community edition ships:
 - local proxy core
 - basic context hygiene filters and secret protection
 - audit log and dry-run inspection
@@ -93,36 +93,9 @@ Included in this free community edition:
 - Anthropic Messages passthrough for Claude Code-compatible upstreams
 - local config and CLI workflow
 
-## Free vs Pro
+## Commercial edition
 
-Free keeps single-session request context clean. Pro preserves reasoning continuity when sessions get long, concurrent, or fragile.
-
-| | Free | Pro ($29/mo) |
-|---|---|---|
-| Basic context hygiene filters (stale reads, thinking, retries, system reminders) | Yes | Yes |
-| Secret detection and blocking | Yes | Yes |
-| OPS metrics and audit log | Yes | Yes |
-| Protocols per instance | One | All (Claude + Codex in one daemon) |
-| Session multiplexing | No | Yes — isolated sessions, no cross-contamination |
-| Advanced continuity repair (prevent 400s) | No | Yes — broken tool chains and oversized requests blocked before they hit the API |
-| Context size guard | No | Yes — rejects requests exceeding model context window before forwarding |
-| Context windowing for cascade | No | Yes — trims conversation to fit when routing to smaller-window models |
-| Circuit breaker (retry spiral prevention) | No | Yes — holds requests after 3 consecutive 400s, always-on |
-| Duplicate and burst detection | No | Yes — always-on guards prevent retry loops and accidental double-sends |
-| Upstream status alerts | No | Yes — outage, quota, and rate limit conditions surfaced immediately |
-| Binary content sanitization | No | Yes — strips control chars from tool results before they corrupt stored history |
-| Model routing (Opus → Haiku, GPT-5 → mini) | No | Yes — automatic with preference list and graceful deprecation handling |
-| Runaway detection and gating | No | Yes — stops budget burn from looping agents |
-| Cooldown warning and context rescue | No | Yes — warns at 80/90/95%, auto-saves work |
-| Session healing (repair JSONL automatically) | No | Yes — orphan removal, chain repair, no manual tools |
-| Reversible secret redaction | No | Yes — secrets replaced outbound, restored inbound |
-| Prompt injection detection | No | Yes — warns on suspicious content in tool results |
-| Per-project cost attribution | No | Yes — track spend by repo/branch |
-| Sensitive path protection | No | Yes — redacts content, teaches model to handle safely |
-| Content access control (deny/allow lists) | No | Yes — configurable per-path content policies |
-| Vector State / RCS / constraint tracking | No | Yes — Pro roadmap for preserving the semantically correct vector to the result |
-
-[Get Pro](https://neurorouter.dev/#pricing) | Free is fully functional for single-session use under AGPL.
+A commercial edition with a different feature set and non-copyleft terms is available at [neurorouter.dev](https://neurorouter.dev). This repository is complete and fully functional on its own for local, single-session context hygiene under the AGPL.
 
 If a proposed change adds new product capability instead of maintaining the existing community edition, it belongs in `neurorouter-pro` unless the public boundary is explicitly expanded first.
 
